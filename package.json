@@ -1,0 +1,17 @@
+{
+  "name": "video-editor-agent-platform",
+  "version": "0.0.1",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/core",
+    "prompts/ai"
+  ],
+  "scripts": {
+    "install": "npm install",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "build": "npm run build --workspaces"
+  }
+}

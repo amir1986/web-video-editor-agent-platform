@@ -1,0 +1,46 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# production
+/build
+
+# misc
+.DS_Store
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+~
+*.tmp
+*.log
+
+# Vite
+/dist
+
+# TypeScript
+*.tsbuildinfo
+
+# Web
+/public
+
+# Local files
+*.local
+
+# Local automation artifacts
+/issues/
+/trajectories/
+
