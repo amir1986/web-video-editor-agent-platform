@@ -94,7 +94,7 @@ Return ONLY valid JSON (no extra text):
     const res = await fetch("http://localhost:11434/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "qwen3-coder:30b", messages: [{ role: "user", content }], temperature: 0, stream: false })
+      body: JSON.stringify({ model: process.env.VISION_MODEL || "qwen2.5vl:7b", messages: [{ role: "user", content }], temperature: 0, stream: false })
     });
     const data = await res.json();
     const text = data.choices?.[0]?.message?.content || "";
