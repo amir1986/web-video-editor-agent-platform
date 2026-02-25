@@ -287,3 +287,52 @@ textarea:focus { border-color: #7c3aed; }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+
+.export-section { display: flex; flex-direction: column; gap: 6px; }
+
+.export-btn {
+  width: 100%;
+  padding: 10px;
+  background: linear-gradient(135deg, #059669, #047857);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+}
+.export-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+
+.cancel-btn {
+  width: 100%;
+  padding: 8px;
+  background: #7f1d1d;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cancel-btn:hover { background: #991b1b; }
+
+.progress-bar {
+  height: 6px;
+  background: #1a1a1a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #059669, #34d399);
+  border-radius: 3px;
+  transition: width 0.2s;
+}
+.progress-label { font-size: 11px; color: #666; text-align: center; }
+
+.export-done {
+  font-size: 12px;
+  color: #34d399;
+  text-align: center;
+  padding: 4px;
+}

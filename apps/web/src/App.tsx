@@ -14,7 +14,10 @@ export default function App() {
   const [agentGoal, setAgentGoal] = useState("");
   const [agentResponse, setAgentResponse] = useState<string | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
   useEffect(() => {
     loadFromDB().then((s) => { if (s) setState(s as ProjectState); }).catch(console.error);
@@ -45,16 +48,76 @@ export default function App() {
     setPlaying(!playing);
   };
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const t = parseFloat(e.target.value);
-    if (videoRef.current) videoRef.current.currentTime = t;
-    setCurrentTime(t);
-  };
-
   const fmt = (t: number) => `${Math.floor(t/60).toString().padStart(2,"0")}:${Math.floor(t%60).toString().padStart(2,"0")}`;
 
   const activeClip = state.clips[state.clips.length - 1];
   const duration = activeClip?.duration || 0;
+
+  const handleExport = async () => {
+    if (!videoRef.current || !activeClip) return;
+    setExporting(true);
+    setExportProgress(0);
+
+    try {
+      const video = videoRef.current;
+      video.currentTime = state.inOut.in;
+      video.pause();
+      setPlaying(false);
+
+      const stream = (video as any).captureStream(30);
+      const chunks: Blob[] = [];
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        const originalName = activeClip.name.replace(/\.[^/.]+$/, "");
+        a.download = `${originalName}_edited.webm`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setExporting(false);
+        setExportProgress(100);
+        setTimeout(() => setExportProgress(0), 2000);
+      };
+
+      recorder.start(100);
+      await video.play();
+
+      const trimDuration = state.inOut.out - state.inOut.in;
+      const startTime = Date.now();
+
+      const interval = setInterval(() => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        const progress = Math.min((elapsed / trimDuration) * 100, 99);
+        setExportProgress(progress);
+
+        if (video.currentTime >= state.inOut.out || elapsed >= trimDuration) {
+          clearInterval(interval);
+          video.pause();
+          recorder.stop();
+          stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+        }
+      }, 200);
+
+    } catch (err) {
+      console.error(err);
+      setExporting(false);
+    }
+  };
+
+  const cancelExport = () => {
+    mediaRecorderRef.current?.stop();
+    videoRef.current?.pause();
+    setExporting(false);
+    setExportProgress(0);
+  };
 
   const handleSuggest = async () => {
     if (!agentGoal.trim()) return;
@@ -67,6 +130,13 @@ export default function App() {
         body: JSON.stringify({ goal: agentGoal, currentState: state }),
       });
       const data = await res.json();
+      if (data?.editPlan?.timelineOps) {
+        for (const op of data.editPlan.timelineOps) {
+          if (op.op === "setInOut") {
+            save({ ...state, inOut: { in: op.in, out: op.out } });
+          }
+        }
+      }
       setAgentResponse(JSON.stringify(data, null, 2));
     } catch {
       setAgentResponse(" Could not reach agent API.\nMake sure apps/api is running on port 3001.");
@@ -89,6 +159,28 @@ export default function App() {
             <div key={c.id} className="clip-item"> {c.name}</div>
           ))}
         </div>
+
+        {activeClip && (
+          <div className="export-section">
+            <div className="panel-header" style={{marginTop: 8}}>Export</div>
+            {exporting ? (
+              <>
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${exportProgress}%` }} />
+                </div>
+                <div className="progress-label">{Math.round(exportProgress)}% exporting...</div>
+                <button className="cancel-btn" onClick={cancelExport}> Cancel</button>
+              </>
+            ) : (
+              <button className="export-btn" onClick={handleExport}>
+                 Export & Download
+              </button>
+            )}
+            {exportProgress === 100 && (
+              <div className="export-done"> Download started!</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* MAIN */}
@@ -118,13 +210,15 @@ export default function App() {
             <button className="play-btn" onClick={togglePlay} disabled={!activeClip}>
               {playing ? "" : ""}
             </button>
-            <input type="range" min={0} max={duration} step={0.05} value={currentTime} onChange={handleSeek} />
+            <input type="range" min={0} max={duration} step={0.05} value={currentTime}
+              onChange={e => { const t = parseFloat(e.target.value); if (videoRef.current) videoRef.current.currentTime = t; setCurrentTime(t); }} />
           </div>
         </div>
 
         <div className="timeline-panel">
           <div className="timeline-labels">
             <span>In: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.in)}</strong></span>
+            <span>Duration: <strong style={{color:"#aaa"}}>{fmt(state.inOut.out - state.inOut.in)}</strong></span>
             <span>Out: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.out)}</strong></span>
           </div>
           <div className="timeline-track">
@@ -151,7 +245,7 @@ export default function App() {
       <div className="panel agent-panel">
         <div className="panel-header"><span className="status-dot" />Agent</div>
         <textarea
-          placeholder={"Describe your edit...\ne.g. trim to first 30 seconds\nadd title at beginning"}
+          placeholder={"Describe your edit...\ne.g. trim to first 30 seconds"}
           value={agentGoal}
           onChange={e => setAgentGoal(e.target.value)}
           rows={5}
