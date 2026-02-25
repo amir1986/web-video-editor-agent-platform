@@ -3,10 +3,9 @@ import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 
 interface Clip { id: string; name: string; url: string; duration: number; }
-interface InOut { in: number; out: number; }
-interface ProjectState { clips: Clip[]; inOut: InOut; titles: string[]; exports: string[]; }
+interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; }
 
-const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 10 }, titles: [], exports: [] };
+const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [] };
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
@@ -31,24 +30,18 @@ export default function App() {
     if (!file) return;
     const url = URL.createObjectURL(file);
     const clip: Clip = { id: Date.now().toString(), name: file.name, url, duration: 0 };
-    const newState = { ...state, clips: [...state.clips, clip] };
-    save(newState);
+    save({ ...state, clips: [...state.clips, clip] });
   };
 
   const handleVideoLoad = () => {
-    if (!videoRef.current) return;
-    const dur = videoRef.current.duration;
+    const dur = videoRef.current?.duration || 0;
     const clips = state.clips.map((c, i) => i === state.clips.length - 1 ? { ...c, duration: dur } : c);
     save({ ...state, clips, inOut: { in: 0, out: dur } });
   };
 
-  const handleTimeUpdate = () => {
-    if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
-  };
-
   const togglePlay = () => {
     if (!videoRef.current) return;
-    if (playing) { videoRef.current.pause(); } else { videoRef.current.play(); }
+    playing ? videoRef.current.pause() : videoRef.current.play();
     setPlaying(!playing);
   };
 
@@ -58,19 +51,10 @@ export default function App() {
     setCurrentTime(t);
   };
 
-  const handleInChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } });
-  };
+  const fmt = (t: number) => `${Math.floor(t/60).toString().padStart(2,"0")}:${Math.floor(t%60).toString().padStart(2,"0")}`;
 
-  const handleOutChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } });
-  };
-
-  const formatTime = (t: number) => {
-    const m = Math.floor(t / 60).toString().padStart(2, "0");
-    const s = Math.floor(t % 60).toString().padStart(2, "0");
-    return `${m}:${s}`;
-  };
+  const activeClip = state.clips[state.clips.length - 1];
+  const duration = activeClip?.duration || 0;
 
   const handleSuggest = async () => {
     if (!agentGoal.trim()) return;
@@ -84,85 +68,98 @@ export default function App() {
       });
       const data = await res.json();
       setAgentResponse(JSON.stringify(data, null, 2));
-    } catch (err) {
-      setAgentResponse("Error: Could not reach agent API. Is apps/api running?");
+    } catch {
+      setAgentResponse(" Could not reach agent API.\nMake sure apps/api is running on port 3001.");
     }
     setAgentLoading(false);
   };
 
-  const activeClip = state.clips[state.clips.length - 1];
-  const duration = activeClip?.duration || 0;
-
   return (
     <div className="app">
-      <div className="panel assets-panel">
-        <h2>Assets</h2>
+      {/* ASSETS */}
+      <div className="panel">
+        <div className="panel-header">Assets</div>
         <label className="import-btn">
-           Import Video
+          <span>＋</span> Import Video
           <input type="file" accept="video/*" onChange={handleImport} style={{ display: "none" }} />
         </label>
         <div className="clip-list">
+          {state.clips.length === 0 && <div style={{ color: "#333", fontSize: 12 }}>No clips yet</div>}
           {state.clips.map((c) => (
             <div key={c.id} className="clip-item"> {c.name}</div>
           ))}
         </div>
       </div>
 
+      {/* MAIN */}
       <div className="main-area">
-        <div className="panel preview-panel">
-          <h2>Preview <span className="timecode">{formatTime(currentTime)}</span></h2>
-          {activeClip ? (
-            <video
-              ref={videoRef}
-              src={activeClip.url}
-              onLoadedMetadata={handleVideoLoad}
-              onTimeUpdate={handleTimeUpdate}
-              style={{ width: "100%", maxHeight: "300px", background: "#000" }}
-            />
-          ) : (
-            <div className="empty-preview">Import a video to preview</div>
-          )}
+        <div className="preview-panel">
+          <div className="preview-top">
+            <div className="panel-header" style={{ borderBottom: "none", paddingBottom: 0 }}>Preview</div>
+            <div className="timecode">{fmt(currentTime)}</div>
+          </div>
+          <div className="video-container">
+            {activeClip ? (
+              <video
+                ref={videoRef}
+                src={activeClip.url}
+                onLoadedMetadata={handleVideoLoad}
+                onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+                onEnded={() => setPlaying(false)}
+              />
+            ) : (
+              <div className="empty-preview">
+                <span></span>
+                Import a video to get started
+              </div>
+            )}
+          </div>
           <div className="controls">
-            <button onClick={togglePlay} disabled={!activeClip}>{playing ? " Pause" : " Play"}</button>
-            <input type="range" min={0} max={duration} step={0.1} value={currentTime} onChange={handleSeek} style={{ flex: 1 }} />
+            <button className="play-btn" onClick={togglePlay} disabled={!activeClip}>
+              {playing ? "" : ""}
+            </button>
+            <input type="range" min={0} max={duration} step={0.05} value={currentTime} onChange={handleSeek} />
           </div>
         </div>
 
-        <div className="panel timeline-panel">
-          <h2>Timeline  In/Out Markers</h2>
-          <div className="inout">
-            <label>In: {formatTime(state.inOut.in)}
-              <input type="range" min={0} max={duration} step={0.1} value={state.inOut.in} onChange={handleInChange} />
-            </label>
-            <label>Out: {formatTime(state.inOut.out)}
-              <input type="range" min={0} max={duration} step={0.1} value={state.inOut.out} onChange={handleOutChange} />
-            </label>
+        <div className="timeline-panel">
+          <div className="timeline-labels">
+            <span>In: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.in)}</strong></span>
+            <span>Out: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.out)}</strong></span>
           </div>
-          <div className="timeline-bar">
-            <div className="timeline-in" style={{ left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%" }} />
-            <div className="timeline-out" style={{ left: duration ? `${(state.inOut.out / duration) * 100}%` : "100%" }} />
+          <div className="timeline-track">
             <div className="timeline-range" style={{
-              left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
-              width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%"
+              left: duration ? `${(state.inOut.in/duration)*100}%` : "0%",
+              width: duration ? `${((state.inOut.out-state.inOut.in)/duration)*100}%` : "100%"
             }} />
+            <div className="timeline-playhead" style={{ left: duration ? `${(currentTime/duration)*100}%` : "0%" }} />
+          </div>
+          <div className="inout-controls">
+            <label>In <span>{fmt(state.inOut.in)}</span>
+              <input type="range" min={0} max={duration} step={0.05} value={state.inOut.in}
+                onChange={e => save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } })} />
+            </label>
+            <label>Out <span>{fmt(state.inOut.out)}</span>
+              <input type="range" min={0} max={duration} step={0.05} value={state.inOut.out}
+                onChange={e => save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } })} />
+            </label>
           </div>
         </div>
       </div>
 
+      {/* AGENT */}
       <div className="panel agent-panel">
-        <h2>Agent</h2>
+        <div className="panel-header"><span className="status-dot" />Agent</div>
         <textarea
-          placeholder="Describe what you want... e.g. trim to first 10 seconds"
+          placeholder={"Describe your edit...\ne.g. trim to first 30 seconds\nadd title at beginning"}
           value={agentGoal}
-          onChange={(e) => setAgentGoal(e.target.value)}
-          rows={4}
+          onChange={e => setAgentGoal(e.target.value)}
+          rows={5}
         />
-        <button onClick={handleSuggest} disabled={agentLoading}>
-          {agentLoading ? "Thinking..." : " Suggest Edit"}
+        <button className="suggest-btn" onClick={handleSuggest} disabled={agentLoading}>
+          {agentLoading ? " Thinking..." : " Suggest Edit"}
         </button>
-        {agentResponse && (
-          <pre className="agent-response">{agentResponse}</pre>
-        )}
+        {agentResponse && <pre className="agent-response">{agentResponse}</pre>}
       </div>
     </div>
   );
