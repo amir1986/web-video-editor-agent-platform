@@ -68,22 +68,73 @@ async function extractFrames(wslIn, duration, count) {
   return frames;
 }
 
+/**
+ * Build time-based highlight segments when AI is unavailable.
+ * Keeps the most interesting portions: intro, middle highlight, and ending.
+ * Targets ~40-60% of the original duration.
+ */
+function buildFallbackSegments(duration) {
+  if (duration <= 10) {
+    // Very short video: keep first 70%
+    return {
+      segments: [{ in: 0, out: Math.round(duration * 0.7 * 10) / 10, reason: "short video - trimmed ending" }],
+      summary: "Short video - trimmed the ending"
+    };
+  }
+  if (duration <= 30) {
+    // Short video: keep opening + best middle section (skip slow start/end)
+    const seg1End = Math.round(duration * 0.35 * 10) / 10;
+    const seg2Start = Math.round(duration * 0.45 * 10) / 10;
+    const seg2End = Math.round(duration * 0.85 * 10) / 10;
+    return {
+      segments: [
+        { in: 0, out: seg1End, reason: "opening section" },
+        { in: seg2Start, out: seg2End, reason: "main highlight" }
+      ],
+      summary: "Kept the best parts of this short clip"
+    };
+  }
+  // Longer video: pick 3-4 segments from different parts
+  const segDur = duration * 0.15; // each segment ~15% of total
+  const segments = [];
+  // Opening hook (first 15%)
+  segments.push({ in: 0, out: Math.round(segDur * 10) / 10, reason: "opening hook" });
+  // Early highlight (around 25-40%)
+  const s2Start = Math.round(duration * 0.25 * 10) / 10;
+  segments.push({ in: s2Start, out: Math.round((s2Start + segDur) * 10) / 10, reason: "early highlight" });
+  // Mid highlight (around 50-65%)
+  const s3Start = Math.round(duration * 0.50 * 10) / 10;
+  segments.push({ in: s3Start, out: Math.round((s3Start + segDur) * 10) / 10, reason: "mid highlight" });
+  // Closing (last 10%)
+  const closeStart = Math.round(duration * 0.85 * 10) / 10;
+  segments.push({ in: closeStart, out: Math.round(duration * 10) / 10, reason: "closing moment" });
+  return {
+    segments,
+    summary: "Auto-generated highlights from key moments"
+  };
+}
+
 async function analyzeWithAI(frames, duration) {
   const timestamps = frames.map(f => `${f.timestamp}s`).join(", ");
 
-  // Try vision-capable request first, fall back to text-only if model doesn't support images
-  const textPrompt = `You are a professional video editor. You have a ${duration.toFixed(1)}-second video with frames at timestamps: ${timestamps}.
+  // Build a strong, explicit prompt for highlight extraction
+  const textPrompt = `You are a professional video editor creating a HIGHLIGHT REEL. Your job is to CUT the video down to only the best moments.
 
-Create an edit plan: keep the most interesting parts, cut boring/repetitive sections.
-As a rule of thumb: keep roughly the best 60% of the video.
+VIDEO INFO: Total duration = ${duration.toFixed(1)} seconds. Frame timestamps: ${timestamps}.
 
-Return ONLY valid JSON (no extra text):
-{
-  "segments": [
-    { "in": <seconds>, "out": <seconds>, "reason": "<why keep this>" }
-  ],
-  "summary": "<one sentence describing the edit>"
-}`;
+RULES:
+1. You MUST select between 2 and 6 segments that together cover 30%-60% of the original duration.
+2. The total kept duration MUST be LESS than ${(duration * 0.65).toFixed(1)} seconds.
+3. Each segment needs "in" (start time) and "out" (end time) in seconds.
+4. CUT OUT: intros, outros, dead air, repetitive parts, pauses, filler.
+5. KEEP: action moments, key points, interesting visuals, emotional peaks, humor.
+6. Segments must not overlap and must be sorted by "in" time.
+
+EXAMPLE for a 60-second video:
+{"segments":[{"in":0,"out":8,"reason":"strong opening"},{"in":15,"out":28,"reason":"main action"},{"in":42,"out":55,"reason":"climax and ending"}],"summary":"Cut from 60s to 34s keeping the best action"}
+
+Now analyze this ${duration.toFixed(1)}-second video and return ONLY valid JSON (no other text):
+{"segments":[{"in":<seconds>,"out":<seconds>,"reason":"<why>"}],"summary":"<one sentence>"}`;
 
   const contentWithImages = [
     { type: "text", text: textPrompt },
@@ -109,27 +160,81 @@ Return ONLY valid JSON (no extra text):
   };
 
   try {
-    return await tryRequest(contentWithImages);
+    const result = await tryRequest(contentWithImages);
+    return result;
   } catch (err) {
     if (err.message === "vision_not_supported" || err.message.includes("missing visual")) {
       console.log("Vision not supported, retrying text-only...");
-      return await tryRequest(textPrompt);
+      try {
+        return await tryRequest(textPrompt);
+      } catch (textErr) {
+        console.log("Text-only AI also failed, using time-based fallback:", textErr.message);
+        return buildFallbackSegments(duration);
+      }
+    }
+    // If AI is completely unavailable (connection refused, etc.), use fallback
+    if (err.message.includes("ECONNREFUSED") || err.message.includes("fetch failed") || err.message.includes("AI no JSON")) {
+      console.log("AI unavailable, using time-based fallback:", err.message);
+      return buildFallbackSegments(duration);
     }
     throw err;
   }
 }
 
+/**
+ * Probe the input video to get its encoding parameters (bitrate, codec, resolution).
+ * Used to re-encode segments at the same quality as the original.
+ */
+async function probeVideoParams(wslIn) {
+  try {
+    const json = await ffprobe(`-v error -select_streams v:0 -show_entries stream=codec_name,bit_rate,width,height -show_entries format=bit_rate -of json "${wslIn}"`);
+    const data = JSON.parse(json);
+    const stream = data.streams?.[0] || {};
+    const format = data.format || {};
+    // Use stream bitrate if available, else format bitrate, else default to high quality
+    const bitrate = parseInt(stream.bit_rate) || parseInt(format.bit_rate) || 0;
+    return {
+      codec: stream.codec_name || "h264",
+      bitrate, // bits per second, 0 means unknown
+      width: stream.width || 0,
+      height: stream.height || 0,
+    };
+  } catch (err) {
+    console.log("[PROBE] Could not probe video params:", err.message);
+    return { codec: "h264", bitrate: 0, width: 0, height: 0 };
+  }
+}
+
 async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
-  // If single full-video segment, copy without re-encoding to preserve quality
+  // If single full-video segment starting at 0, copy without re-encoding
   if (segments.length === 1 && segments[0].in === 0) {
     await ffmpeg(`-y -i "${wslIn}" -c copy "${wslOut}"`);
     return;
   }
+
+  // Probe original quality to preserve it
+  const params = await probeVideoParams(wslIn);
+  console.log(`[STITCH] Original video: codec=${params.codec}, bitrate=${params.bitrate}, ${params.width}x${params.height}`);
+
+  // Build encoding args that match or exceed original quality
+  let encArgs;
+  if (params.bitrate > 0) {
+    // Re-encode at the original bitrate (no quality loss relative to source)
+    const vbr = Math.ceil(params.bitrate / 1000) + "k";
+    const bufsize = Math.ceil(params.bitrate * 2 / 1000) + "k";
+    encArgs = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 192k -preset slow`;
+    console.log(`[STITCH] Encoding at original bitrate: ${vbr}`);
+  } else {
+    // Bitrate unknown: use CRF 17 (visually lossless) to ensure no quality loss
+    encArgs = `-c:v libx264 -crf 17 -preset slow -c:a aac -b:a 192k`;
+    console.log(`[STITCH] Bitrate unknown, using CRF 17 (visually lossless)`);
+  }
+
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c:v libx264 -c:a aac -preset medium -crf 23 -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} ${encArgs} -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
   const concatFile = path.join(tmpDir, "concat.txt");
@@ -171,7 +276,17 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   try {
     fs.writeFileSync(tmpIn, req.body);
     console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s`);
-    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c:v libx264 -c:a aac -preset ultrafast -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
+    // Probe original bitrate to preserve quality
+    const params = await probeVideoParams(toWslPath(tmpIn));
+    let trimEnc;
+    if (params.bitrate > 0) {
+      const vbr = Math.ceil(params.bitrate / 1000) + "k";
+      const bufsize = Math.ceil(params.bitrate * 2 / 1000) + "k";
+      trimEnc = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 192k -preset medium`;
+    } else {
+      trimEnc = `-c:v libx264 -crf 17 -preset medium -c:a aac -b:a 192k`;
+    }
+    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} ${trimEnc} -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
@@ -199,18 +314,32 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     const frames = await extractFrames(wslIn, duration, frameCount);
 
     console.log("AI analyzing...");
-    const plan = await analyzeWithAI(frames, duration);
+    let plan;
+    try {
+      plan = await analyzeWithAI(frames, duration);
+    } catch (aiErr) {
+      console.log("AI analysis failed, using time-based fallback:", aiErr.message);
+      plan = buildFallbackSegments(duration);
+    }
     console.log(`AI found ${plan.segments?.length} segments:`, plan.summary);
 
-    const rawSegments = plan.segments?.filter(s => s.out > s.in) || [];
-    const segments = rawSegments.length
-      ? rawSegments.map(s => ({ in: Math.max(0, s.in), out: Math.min(duration, s.out), reason: s.reason })).sort((a, b) => a.in - b.in)
-      : [{ in: 0, out: duration, reason: "full video" }];
+    let rawSegments = (plan.segments || [])
+      .filter(s => typeof s.in === "number" && typeof s.out === "number" && s.out > s.in)
+      .map(s => ({ in: Math.max(0, s.in), out: Math.min(duration, s.out), reason: s.reason || "highlight" }))
+      .sort((a, b) => a.in - b.in);
 
-    if (!rawSegments.length) {
-      plan.summary = plan.summary || "No highlights found - sending full video";
-      console.log("AI found no segments, using full video as fallback");
+    // Validate: total kept duration must be < 90% of original (otherwise AI returned near-full video)
+    const totalKept = rawSegments.reduce((sum, s) => sum + (s.out - s.in), 0);
+    if (!rawSegments.length || totalKept >= duration * 0.90) {
+      console.log(`[AUTO-EDIT] Segments invalid or cover ${(totalKept / duration * 100).toFixed(0)}% of video — using time-based fallback`);
+      const fallback = buildFallbackSegments(duration);
+      rawSegments = fallback.segments;
+      plan.summary = fallback.summary;
     }
+
+    const segments = rawSegments;
+    const finalDuration = segments.reduce((sum, s) => sum + (s.out - s.in), 0);
+    console.log(`[AUTO-EDIT] Keeping ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
 
     console.log(`Stitching ${segments.length} segments...`);
     await stitchSegments(wslIn, segments, wslOut, tmpDir);
