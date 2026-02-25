@@ -11,7 +11,6 @@ export function preloadFFmpeg(): Promise<void> {
     await ffmpeg.load({
       coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
       wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
-      workerURL: await toBlobURL("/ffmpeg/ffmpeg-core.worker.js", "text/javascript"),
     });
   })();
   return loadPromise;
