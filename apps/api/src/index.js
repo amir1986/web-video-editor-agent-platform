@@ -48,7 +48,7 @@ app.post("/api/analyze", async (req, res) => {
     {
       type: "text",
       text: `You are a video highlight editor. You receive ${frames?.length || 0} frames from a ${parseFloat(duration || 0).toFixed(1)}-second video.
-Find the single best highlight moment (action, kill, goal, key event). Ignore menus, loading, idle.
+Analyze the full video and decide what to keep based on content. Can be a short highlight or longer sequence - you decide based on what makes sense for the content.
 Return ONLY valid JSON, no markdown:
 {"editPlan":{"timelineOps":[{"op":"setInOut","in":<number>,"out":<number>}],"summary":"<one sentence>"}}`
     },
@@ -119,7 +119,7 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     const duration = parseFloat(durationStr);
 
     // Extract 6 frames
-    const frameCount = 6;
+    const frameCount = Math.min(16, Math.floor(duration));
     const interval = duration / frameCount;
     await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=256:144" -frames:v ${frameCount} "${wslFrames}/frame%03d.jpg"`);
 
@@ -131,7 +131,7 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
 
     // AI analyze
     const content = [
-      { type: "text", text: `You are a video highlight editor. ${frames.length} frames from ${duration.toFixed(1)}s video. Find best highlight. Return ONLY JSON: {"editPlan":{"timelineOps":[{"op":"setInOut","in":<n>,"out":<n>}],"summary":"<text>"}}` },
+      { type: "text", text: `You are a video highlight editor. ${frames.length} frames from ${duration.toFixed(1)}s video. Analyze the ENTIRE video. You may select ANY portion - short highlight OR longer sequence based on what makes sense. No time limits. Return ONLY JSON: {"editPlan":{"timelineOps":[{"op":"setInOut","in":<n>,"out":<n>}],"summary":"<text>"}}` },
       ...frames.map(f => ({ type: "image_url", image_url: { url: f } }))
     ];
 
@@ -151,7 +151,7 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     if (!op) return res.status(422).json({ error: "No setInOut", plan });
 
     const inSec  = Math.max(0, op.in);
-    const outSec = Math.min(duration, op.out);
+    const outSec = op.out;
 
     await ffmpeg(`-y -ss ${inSec} -i "${wslIn}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
 
@@ -180,3 +180,5 @@ app.listen(3001, () => {
   console.log("  POST /api/trim      - Trim video (via WSL ffmpeg)");
   console.log("  POST /api/auto-edit - Full pipeline for bots");
 });
+
+
