@@ -9,8 +9,8 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "@ffmpeg/core": "^0.12.6",
-    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/core": "^0.11.0",
+    "@ffmpeg/ffmpeg": "^0.11.6",
     "@ffmpeg/util": "^0.12.2",
     "mp4box": "^2.3.0",
     "react": "^18.2.0",
