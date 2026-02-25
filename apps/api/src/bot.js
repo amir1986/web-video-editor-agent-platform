@@ -38,28 +38,19 @@ async function getMTClient() {
 }
 
 /**
- * Download a file from Telegram.
- * Files <= 20MB use the standard Bot API (fast).
- * Files > 20MB use MTProto via gramjs (no size limit).
+ * Download via MTProto (gramjs) – no file size limit.
  */
-async function downloadTelegramFile(fileId, fileSize, chatId, messageId, destPath) {
-  if (!fileSize || fileSize <= MAX_BOT_API_DOWNLOAD) {
-    // Standard Bot API download
-    const filePath = await bot.downloadFile(fileId, os.tmpdir());
-    fs.renameSync(filePath, destPath);
-    return;
-  }
-
-  // Large file – use MTProto
+async function downloadViaMTProto(chatId, messageId, destPath, fileSize) {
   const client = await getMTClient();
   if (!client) {
     throw new Error(
-      "File is larger than 20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH env vars to enable large file downloads.\n" +
-      "Get them from https://my.telegram.org"
+      "הקובץ גדול מ-20MB. כדי לאפשר הורדת קבצים גדולים הגדר TELEGRAM_API_ID ו-TELEGRAM_API_HASH.\n" +
+      "ניתן לקבל אותם מ: https://my.telegram.org"
     );
   }
 
-  console.log(`[MTProto] Downloading large file (${(fileSize / (1024 * 1024)).toFixed(1)}MB)...`);
+  const sizeMB = fileSize ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB` : "unknown size";
+  console.log(`[MTProto] Downloading large file (${sizeMB})...`);
   const messages = await client.getMessages(chatId, { ids: [messageId] });
   if (!messages || !messages[0]) {
     throw new Error("Could not retrieve message via MTProto");
@@ -67,6 +58,32 @@ async function downloadTelegramFile(fileId, fileSize, chatId, messageId, destPat
   const buffer = await client.downloadMedia(messages[0]);
   fs.writeFileSync(destPath, buffer);
   console.log(`[MTProto] Download complete: ${destPath}`);
+}
+
+/**
+ * Download a file from Telegram.
+ * - If file_size is known and > 20MB → go straight to MTProto.
+ * - Otherwise try Bot API first; if it fails with "file is too big" → fallback to MTProto.
+ */
+async function downloadTelegramFile(fileId, fileSize, chatId, messageId, destPath) {
+  // If we already know it's large, skip Bot API entirely
+  if (fileSize && fileSize > MAX_BOT_API_DOWNLOAD) {
+    return downloadViaMTProto(chatId, messageId, destPath, fileSize);
+  }
+
+  // Try standard Bot API (fast, works for ≤20MB)
+  try {
+    const filePath = await bot.downloadFile(fileId, os.tmpdir());
+    fs.renameSync(filePath, destPath);
+    return;
+  } catch (err) {
+    // If Bot API says "file is too big", fallback to MTProto
+    if (err.message && err.message.includes("file is too big")) {
+      console.log("[Bot API] File too big for getFile, falling back to MTProto...");
+      return downloadViaMTProto(chatId, messageId, destPath, fileSize);
+    }
+    throw err;
+  }
 }
 
 console.log("Telegram bot started, waiting for videos...");
