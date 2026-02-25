@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "EditPlan",
+  "description": "A plan of operations to apply to a project state",
+  "additionalProperties": false,
+  "properties": {
+    "ops": {
+      "type": "array",
+      "description": "List of operations to apply",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op"],
+        "properties": {
+          "op": {
+            "type": "string",
+            "description": "Operation to perform"
+          }
+        }
+      }
+    }
+  },
+  "required": ["ops"]
+}
