@@ -44,14 +44,17 @@ bot.on("video", async (msg) => {
     const videoBuffer = fs.readFileSync(tmpIn);
     const name = msg.video.file_name?.replace(/\.[^/.]+$/, "") || "video";
 
+    console.log(`[DEBUG] Sending to API: ${API_URL}/api/auto-edit, video size: ${videoBuffer.length} bytes`);
     const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
     });
 
+    console.log(`[DEBUG] API response status: ${res.status}`);
     if (!res.ok) {
       const err = await res.text();
+      console.log(`[DEBUG] API error body: ${err}`);
       throw new Error(`API error ${res.status}: ${err}`);
     }
 
