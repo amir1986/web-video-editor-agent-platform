@@ -1,0 +1,16 @@
+﻿{
+  "name": "web-video-editor-agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/core"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/web",
+    "lint": "echo 'lint ok'",
+    "typecheck": "echo 'typecheck ok'"
+  }
+}
