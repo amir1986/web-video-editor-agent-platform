@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "web-video-editor-agent-platform",
   "version": "0.1.0",
   "private": true,
@@ -12,5 +12,9 @@
     "build": "npm run build --workspace=apps/web",
     "lint": "echo 'lint ok'",
     "typecheck": "echo 'typecheck ok'"
+  },
+  "dependencies": {
+    "@telegram.ts/types": "^1.26.0",
+    "telegram": "^2.26.22"
   }
 }

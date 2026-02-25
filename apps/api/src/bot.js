@@ -1,4 +1,6 @@
 const TelegramBot = require("node-telegram-bot-api");
+const { TelegramClient } = require("telegram");
+const { StringSession } = require("telegram/sessions");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -11,14 +13,68 @@ if (!TOKEN) {
 }
 
 const API_URL = process.env.API_URL || "http://localhost:3001";
+const TG_API_ID = parseInt(process.env.TELEGRAM_API_ID) || 0;
+const TG_API_HASH = process.env.TELEGRAM_API_HASH || "";
 
 // Telegram Bot API limits
-const MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024; // 20MB - getFile limit
-const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;   // 50MB - sendVideo/sendDocument limit
+const MAX_BOT_API_DOWNLOAD = 20 * 1024 * 1024; // 20MB - getFile limit
+const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;       // 50MB - sendVideo/sendDocument limit
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
+// --- MTProto client for large file downloads (bypasses 20MB limit) ---
+let mtClient = null;
+
+async function getMTClient() {
+  if (mtClient) return mtClient;
+  if (!TG_API_ID || !TG_API_HASH) return null;
+
+  mtClient = new TelegramClient(new StringSession(""), TG_API_ID, TG_API_HASH, {
+    connectionRetries: 5,
+  });
+  await mtClient.start({ botAuthToken: TOKEN });
+  console.log("[MTProto] Client connected for large file downloads");
+  return mtClient;
+}
+
+/**
+ * Download a file from Telegram.
+ * Files <= 20MB use the standard Bot API (fast).
+ * Files > 20MB use MTProto via gramjs (no size limit).
+ */
+async function downloadTelegramFile(fileId, fileSize, chatId, messageId, destPath) {
+  if (!fileSize || fileSize <= MAX_BOT_API_DOWNLOAD) {
+    // Standard Bot API download
+    const filePath = await bot.downloadFile(fileId, os.tmpdir());
+    fs.renameSync(filePath, destPath);
+    return;
+  }
+
+  // Large file – use MTProto
+  const client = await getMTClient();
+  if (!client) {
+    throw new Error(
+      "File is larger than 20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH env vars to enable large file downloads.\n" +
+      "Get them from https://my.telegram.org"
+    );
+  }
+
+  console.log(`[MTProto] Downloading large file (${(fileSize / (1024 * 1024)).toFixed(1)}MB)...`);
+  const messages = await client.getMessages(chatId, { ids: [messageId] });
+  if (!messages || !messages[0]) {
+    throw new Error("Could not retrieve message via MTProto");
+  }
+  const buffer = await client.downloadMedia(messages[0]);
+  fs.writeFileSync(destPath, buffer);
+  console.log(`[MTProto] Download complete: ${destPath}`);
+}
+
 console.log("Telegram bot started, waiting for videos...");
+if (TG_API_ID && TG_API_HASH) {
+  console.log("  MTProto enabled – large file downloads supported (>20MB)");
+} else {
+  console.log("  MTProto disabled – max download 20MB. Set TELEGRAM_API_ID + TELEGRAM_API_HASH for large files");
+}
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id, "Send me a video and I'll auto-edit the highlights for you!");
@@ -30,23 +86,13 @@ bot.on("video", async (msg) => {
 
   if (!video) return;
 
-  // Check file size before downloading (Telegram getFile limit is 20MB)
-  if (video.file_size && video.file_size > MAX_DOWNLOAD_SIZE) {
-    const sizeMB = (video.file_size / (1024 * 1024)).toFixed(1);
-    await bot.sendMessage(chatId,
-      `The video is too large (${sizeMB}MB). Telegram limits bot downloads to 20MB.\nPlease send a shorter or lower-resolution video.`
-    );
-    return;
-  }
-
   const statusMsg = await bot.sendMessage(chatId, "Downloading video...");
   const tmpIn = path.join(os.tmpdir(), `tg_${crypto.randomBytes(6).toString("hex")}.mp4`);
   const tmpOut = path.join(os.tmpdir(), `tg_out_${crypto.randomBytes(6).toString("hex")}.mp4`);
 
   try {
-    // Download video from Telegram
-    const filePath = await bot.downloadFile(video.file_id, os.tmpdir());
-    fs.renameSync(filePath, tmpIn);
+    // Download video from Telegram (auto-selects Bot API or MTProto based on size)
+    await downloadTelegramFile(video.file_id, video.file_size, chatId, msg.message_id, tmpIn);
 
     await bot.editMessageText("Processing with AI... this may take a minute.", {
       chat_id: chatId,
@@ -122,22 +168,13 @@ bot.on("document", async (msg) => {
 
   const chatId = msg.chat.id;
 
-  // Check file size before downloading (Telegram getFile limit is 20MB)
-  if (doc.file_size && doc.file_size > MAX_DOWNLOAD_SIZE) {
-    const sizeMB = (doc.file_size / (1024 * 1024)).toFixed(1);
-    await bot.sendMessage(chatId,
-      `The video is too large (${sizeMB}MB). Telegram limits bot downloads to 20MB.\nPlease send a shorter or lower-resolution video.`
-    );
-    return;
-  }
-
   const statusMsg = await bot.sendMessage(chatId, "Downloading video...");
   const tmpIn = path.join(os.tmpdir(), `tg_${crypto.randomBytes(6).toString("hex")}.mp4`);
   const tmpOut = path.join(os.tmpdir(), `tg_out_${crypto.randomBytes(6).toString("hex")}.mp4`);
 
   try {
-    const filePath = await bot.downloadFile(doc.file_id, os.tmpdir());
-    fs.renameSync(filePath, tmpIn);
+    // Download video from Telegram (auto-selects Bot API or MTProto based on size)
+    await downloadTelegramFile(doc.file_id, doc.file_size, chatId, msg.message_id, tmpIn);
 
     await bot.editMessageText("Processing with AI... this may take a minute.", {
       chat_id: chatId,
