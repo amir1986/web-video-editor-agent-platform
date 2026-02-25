@@ -1,0 +1,9 @@
+﻿issue0=https://github.com/amir1986/web-video-editor-agent-platform/issues/1
+issue1=https://github.com/amir1986/web-video-editor-agent-platform/issues/2
+issue2=https://github.com/amir1986/web-video-editor-agent-platform/issues/3
+issue3=https://github.com/amir1986/web-video-editor-agent-platform/issues/4
+issue4=https://github.com/amir1986/web-video-editor-agent-platform/issues/5
+issue5=https://github.com/amir1986/web-video-editor-agent-platform/issues/7
+issue6=https://github.com/amir1986/web-video-editor-agent-platform/issues/8
+issue7=https://github.com/amir1986/web-video-editor-agent-platform/issues/9
+issue8=https://github.com/amir1986/web-video-editor-agent-platform/issues/10
