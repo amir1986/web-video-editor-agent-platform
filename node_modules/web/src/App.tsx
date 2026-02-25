@@ -72,7 +72,21 @@ export default function App() {
           }
         }
       }
-      setAgentSummary(data?.editPlan?.summary || "Done");
+      const summary = data?.editPlan?.summary || "Done";
+      setAgentSummary(summary);
+
+      // אוטומטית מוריד אחרי שה-AI בחר
+      if (data?.editPlan?.timelineOps) {
+        const op = data.editPlan.timelineOps.find((o: any) => o.op === "setInOut");
+        if (op && activeClip) {
+          setExporting(true);
+          setExportProgress(0);
+          const name = activeClip.name.replace(/\.[^/.]+$/, "");
+          await exportTrimmed(activeClip.url, op.in, op.out, `${name}_highlight.mp4`, setExportProgress);
+          setExportDone(true);
+          setExporting(false);
+        }
+      }
     } catch {
       setAgentSummary(" API not running. Start apps/api on port 3001.");
     }
@@ -123,11 +137,7 @@ export default function App() {
 
         <div className="spacer" />
 
-        {activeClip && (
-          <div className="export-box">
-            <div className="section-label">Export</div>
-            <div className="export-info">
-              <span>{fmt(state.inOut.in)}  {fmt(state.inOut.out)}</span>
+  {fmt(state.inOut.out)}</span>
               <span className="export-dur">{fmt(state.inOut.out - state.inOut.in)}</span>
             </div>
             {exporting ? (
@@ -251,3 +261,5 @@ export default function App() {
     </div>
   );
 }
+
+
