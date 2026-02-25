@@ -179,12 +179,15 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     const plan = await analyzeWithAI(frames, duration);
     console.log(`AI found ${plan.segments?.length} segments:`, plan.summary);
 
-    if (!plan.segments?.length) throw new Error("AI found no segments");
+    const rawSegments = plan.segments?.filter(s => s.out > s.in) || [];
+    const segments = rawSegments.length
+      ? rawSegments.map(s => ({ in: Math.max(0, s.in), out: Math.min(duration, s.out), reason: s.reason })).sort((a, b) => a.in - b.in)
+      : [{ in: 0, out: duration, reason: "full video" }];
 
-    const segments = plan.segments
-      .filter(s => s.out > s.in)
-      .map(s => ({ in: Math.max(0, s.in), out: Math.min(duration, s.out), reason: s.reason }))
-      .sort((a, b) => a.in - b.in);
+    if (!rawSegments.length) {
+      plan.summary = plan.summary || "No highlights found - sending full video";
+      console.log("AI found no segments, using full video as fallback");
+    }
 
     console.log(`Stitching ${segments.length} segments...`);
     await stitchSegments(wslIn, segments, wslOut, tmpDir);
