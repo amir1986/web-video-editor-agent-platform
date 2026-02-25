@@ -2,7 +2,11 @@
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
-import { exportTrimmed } from "./export";
+// preload ffmpeg in background
+preloadFFmpeg().catch(console.error);
+// preload ffmpeg in background
+preloadFFmpeg().catch(console.error);
+import { exportTrimmed, preloadFFmpeg } from "./export";
 
 interface Clip { id: string; name: string; url: string; duration: number; }
 interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; }
@@ -244,3 +248,5 @@ export default function App() {
     </div>
   );
 }
+
+

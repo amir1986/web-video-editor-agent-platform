@@ -2,16 +2,16 @@
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
 
 let ffmpeg: FFmpeg | null = null;
+let loaded = false;
 
-export async function loadFFmpeg(onProgress: (p: number) => void): Promise<FFmpeg> {
-  if (ffmpeg?.loaded) return ffmpeg;
+export async function preloadFFmpeg(): Promise<void> {
+  if (loaded) return;
   ffmpeg = new FFmpeg();
-  ffmpeg.on("progress", ({ progress }) => onProgress(Math.round(progress * 100)));
   await ffmpeg.load({
     coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
     wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
   });
-  return ffmpeg;
+  loaded = true;
 }
 
 export async function exportTrimmed(
@@ -21,13 +21,28 @@ export async function exportTrimmed(
   filename: string,
   onProgress: (p: number) => void
 ): Promise<void> {
-  const ff = await loadFFmpeg(onProgress);
-  onProgress(5);
-  await ff.writeFile("input.mp4", await fetchFile(videoUrl));
-  onProgress(20);
-  await ff.exec(["-i","input.mp4","-ss",String(inSec),"-to",String(outSec),"-c","copy","output.mp4"]);
-  onProgress(90);
-  const data = await ff.readFile("output.mp4") as Uint8Array;
+  if (!loaded || !ffmpeg) {
+    onProgress(5);
+    await preloadFFmpeg();
+  }
+
+  ffmpeg!.on("progress", ({ progress }) => onProgress(10 + Math.round(progress * 85)));
+
+  onProgress(10);
+  await ffmpeg!.writeFile("input.mp4", await fetchFile(videoUrl));
+  onProgress(30);
+
+  await ffmpeg!.exec([
+    "-ss", String(inSec),
+    "-i", "input.mp4",
+    "-t", String(outSec - inSec),
+    "-c", "copy",
+    "-avoid_negative_ts", "make_zero",
+    "output.mp4"
+  ]);
+
+  onProgress(95);
+  const data = await ffmpeg!.readFile("output.mp4") as Uint8Array;
   const blob = new Blob([data], { type: "video/mp4" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
