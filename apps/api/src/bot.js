@@ -66,20 +66,28 @@ async function downloadViaMTProto(chatId, messageId, destPath, fileSize) {
  * - Otherwise try Bot API first; if it fails with "file is too big" → fallback to MTProto.
  */
 async function downloadTelegramFile(fileId, fileSize, chatId, messageId, destPath) {
+  const sizeMB = fileSize ? (fileSize / (1024 * 1024)).toFixed(1) : "unknown";
+  console.log(`[DOWNLOAD] fileId=${fileId}, fileSize=${fileSize} (${sizeMB}MB), chatId=${chatId}, msgId=${messageId}`);
+  console.log(`[DOWNLOAD] MAX_BOT_API_DOWNLOAD=${MAX_BOT_API_DOWNLOAD}, isLarge=${fileSize && fileSize > MAX_BOT_API_DOWNLOAD}`);
+
   // If we already know it's large, skip Bot API entirely
   if (fileSize && fileSize > MAX_BOT_API_DOWNLOAD) {
+    console.log("[DOWNLOAD] File size known & > 20MB → using MTProto directly");
     return downloadViaMTProto(chatId, messageId, destPath, fileSize);
   }
 
   // Try standard Bot API (fast, works for ≤20MB)
+  console.log("[DOWNLOAD] Trying Bot API download...");
   try {
     const filePath = await bot.downloadFile(fileId, os.tmpdir());
+    console.log(`[DOWNLOAD] Bot API success: ${filePath}`);
     fs.renameSync(filePath, destPath);
     return;
   } catch (err) {
+    console.log(`[DOWNLOAD] Bot API failed: ${err.message}`);
     // If Bot API says "file is too big", fallback to MTProto
     if (err.message && err.message.includes("file is too big")) {
-      console.log("[Bot API] File too big for getFile, falling back to MTProto...");
+      console.log("[DOWNLOAD] Falling back to MTProto...");
       return downloadViaMTProto(chatId, messageId, destPath, fileSize);
     }
     throw err;
@@ -102,6 +110,9 @@ bot.on("video", async (msg) => {
   const video = msg.video;
 
   if (!video) return;
+
+  console.log(`[VIDEO] Received video: file_id=${video.file_id}, file_size=${video.file_size}, file_unique_id=${video.file_unique_id}`);
+  console.log(`[VIDEO] file_size type: ${typeof video.file_size}, value: ${JSON.stringify(video.file_size)}`);
 
   const statusMsg = await bot.sendMessage(chatId, "Downloading video...");
   const tmpIn = path.join(os.tmpdir(), `tg_${crypto.randomBytes(6).toString("hex")}.mp4`);
@@ -182,6 +193,9 @@ bot.on("video", async (msg) => {
 bot.on("document", async (msg) => {
   const doc = msg.document;
   if (!doc || !doc.mime_type?.startsWith("video/")) return;
+
+  console.log(`[DOC] Received document: file_id=${doc.file_id}, file_size=${doc.file_size}, mime=${doc.mime_type}`);
+  console.log(`[DOC] file_size type: ${typeof doc.file_size}, value: ${JSON.stringify(doc.file_size)}`);
 
   const chatId = msg.chat.id;
 
