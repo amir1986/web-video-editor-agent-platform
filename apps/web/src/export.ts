@@ -1,61 +1,56 @@
-﻿export async function exportTrimmed(
+﻿import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile, toBlobURL } from "@ffmpeg/util";
+
+let ffmpeg: FFmpeg | null = null;
+let loadPromise: Promise<void> | null = null;
+
+export function preloadFFmpeg(): Promise<void> {
+  if (loadPromise) return loadPromise;
+  loadPromise = (async () => {
+    ffmpeg = new FFmpeg();
+    await ffmpeg.load({
+      coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
+      wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
+    });
+  })();
+  return loadPromise;
+}
+
+export async function exportTrimmed(
   videoUrl: string,
   inSec: number,
   outSec: number,
   filename: string,
   onProgress: (p: number) => void
 ): Promise<void> {
-  onProgress(10);
+  onProgress(5);
+  await preloadFFmpeg();
+  onProgress(15);
 
-  const response = await fetch(videoUrl);
-  const arrayBuffer = await response.arrayBuffer();
-  onProgress(40);
+  ffmpeg!.on("progress", ({ progress }) => onProgress(15 + Math.round(progress * 80)));
 
-  // @ts-ignore
-  const MP4Box = (await import("mp4box")).default;
-  const mp4boxIn = MP4Box.createFile();
-  const mp4boxOut = MP4Box.createFile();
+  await ffmpeg!.writeFile("input.mp4", await fetchFile(videoUrl));
+  onProgress(25);
 
-  await new Promise<void>((resolve, reject) => {
-    mp4boxIn.onReady = (info: any) => {
-      onProgress(60);
-      const tracks = info.tracks.map((t: any) => t.id);
-      tracks.forEach((id: number) => mp4boxIn.setExtractionOptions(id, null, { nbSamples: Infinity }));
+  await ffmpeg!.exec([
+    "-ss", String(inSec),
+    "-i", "input.mp4",
+    "-t", String(outSec - inSec),
+    "-c", "copy",
+    "-avoid_negative_ts", "make_zero",
+    "output.mp4"
+  ]);
 
-      mp4boxIn.onSamples = (id: number, user: any, samples: any[]) => {
-        const filtered = samples.filter(s => {
-          const t = s.cts / s.timescale;
-          return t >= inSec && t <= outSec;
-        });
-        filtered.forEach(s => mp4boxOut.addSample(id, s.data, s));
-      };
-
-      mp4boxIn.start();
-    };
-
-    mp4boxIn.onError = reject;
-
-    const buf = arrayBuffer as any;
-    buf.fileStart = 0;
-    mp4boxIn.appendBuffer(buf);
-    mp4boxIn.flush();
-
-    setTimeout(() => {
-      onProgress(85);
-      const outBuffer = mp4boxOut.save("");
-      const blob = new Blob([outBuffer], { type: "video/mp4" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      onProgress(100);
-      resolve();
-    }, 500);
-  });
+  onProgress(95);
+  const data = await ffmpeg!.readFile("output.mp4") as Uint8Array;
+  const blob = new Blob([data], { type: "video/mp4" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  onProgress(100);
 }
-
-export async function preloadFFmpeg(): Promise<void> {}
