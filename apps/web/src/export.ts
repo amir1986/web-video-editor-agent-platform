@@ -1,49 +1,30 @@
-﻿import { createFFmpeg, fetchFile } from "@ffmpeg/ffmpeg";
-
-let ffmpeg: any = null;
-let loadPromise: Promise<void> | null = null;
-
-export function preloadFFmpeg(): Promise<void> {
-  if (loadPromise) return loadPromise;
-  loadPromise = (async () => {
-    ffmpeg = createFFmpeg({
-      log: false,
-      corePath: "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js",
-    });
-    await ffmpeg.load();
-  })();
-  return loadPromise;
-}
-
-export async function exportTrimmed(
+﻿export async function exportTrimmed(
   videoUrl: string,
   inSec: number,
   outSec: number,
   filename: string,
   onProgress: (p: number) => void
 ): Promise<void> {
-  onProgress(5);
-  await preloadFFmpeg();
-  onProgress(15);
+  onProgress(10);
 
-  ffmpeg.setProgress(({ ratio }: { ratio: number }) => {
-    onProgress(15 + Math.round(ratio * 80));
+  const videoRes = await fetch(videoUrl);
+  const videoBlob = await videoRes.blob();
+  onProgress(30);
+
+  const formData = new FormData();
+  formData.append("video", videoBlob, "input.mp4");
+
+  const res = await fetch(`http://localhost:3001/api/export?in=${inSec}&out=${outSec}`, {
+    method: "POST",
+    body: videoBlob,
+    headers: { "Content-Type": "video/mp4" },
   });
 
-  ffmpeg.FS("writeFile", "input.mp4", await fetchFile(videoUrl));
-  onProgress(25);
+  onProgress(80);
 
-  await ffmpeg.run(
-    "-ss", String(inSec),
-    "-i", "input.mp4",
-    "-t", String(outSec - inSec),
-    "-c", "copy",
-    "output.mp4"
-  );
+  if (!res.ok) throw new Error(await res.text());
 
-  onProgress(95);
-  const data = ffmpeg.FS("readFile", "output.mp4");
-  const blob = new Blob([data.buffer], { type: "video/mp4" });
+  const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -53,4 +34,8 @@ export async function exportTrimmed(
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
   onProgress(100);
+}
+
+export function preloadFFmpeg(): Promise<void> {
+  return Promise.resolve();
 }
