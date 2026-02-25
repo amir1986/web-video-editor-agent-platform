@@ -1,4 +1,5 @@
-﻿import React, { useState, useEffect, useRef } from "react";
+﻿import { exportTrimmed } from "./export";
+import React, { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 
@@ -54,62 +55,24 @@ export default function App() {
   const duration = activeClip?.duration || 0;
 
   const handleExport = async () => {
-    if (!videoRef.current || !activeClip) return;
+    if (!activeClip) return;
     setExporting(true);
     setExportProgress(0);
-
     try {
-      const video = videoRef.current;
-      video.currentTime = state.inOut.in;
-      video.pause();
-      setPlaying(false);
-
-      const stream = (video as any).captureStream(30);
-      const chunks: Blob[] = [];
-      const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: "video/webm" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        const originalName = activeClip.name.replace(/\.[^/.]+$/, "");
-        a.download = `${originalName}_edited.webm`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        setExporting(false);
-        setExportProgress(100);
-        setTimeout(() => setExportProgress(0), 2000);
-      };
-
-      recorder.start(100);
-      await video.play();
-
-      const trimDuration = state.inOut.out - state.inOut.in;
-      const startTime = Date.now();
-
-      const interval = setInterval(() => {
-        const elapsed = (Date.now() - startTime) / 1000;
-        const progress = Math.min((elapsed / trimDuration) * 100, 99);
-        setExportProgress(progress);
-
-        if (video.currentTime >= state.inOut.out || elapsed >= trimDuration) {
-          clearInterval(interval);
-          video.pause();
-          recorder.stop();
-          stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
-        }
-      }, 200);
-
+      const originalName = activeClip.name.replace(/\.[^/.]+$/, "");
+      await exportTrimmed(
+        activeClip.url,
+        state.inOut.in,
+        state.inOut.out,
+        `${originalName}_edited.mp4`,
+        (p) => setExportProgress(p)
+      );
+      setExportProgress(100);
+      setTimeout(() => setExportProgress(0), 2000);
     } catch (err) {
       console.error(err);
-      setExporting(false);
     }
+    setExporting(false);
   };
 
   const cancelExport = () => {
@@ -258,3 +221,4 @@ export default function App() {
     </div>
   );
 }
+
