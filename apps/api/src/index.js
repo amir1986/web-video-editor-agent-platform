@@ -183,14 +183,17 @@ Now analyze this ${duration.toFixed(1)}-second video and return ONLY valid JSON 
 }
 
 async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
-  // Single full-video segment: straight copy
-  if (segments.length === 1 && segments[0].in === 0) {
-    await ffmpeg(`-y -i "${wslIn}" -c copy "${wslOut}"`);
+  // Single segment: extract directly to output (no concat needed)
+  if (segments.length === 1) {
+    const seg = segments[0];
+    console.log(`[STITCH] Single segment: ${seg.in}s → ${seg.out}s (stream copy)`);
+    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
     return;
   }
 
-  // Use stream copy (-c copy) for each segment: zero quality loss, preserves
-  // resolution, rotation metadata, aspect ratio, frame rate — everything.
+  // Multiple segments: extract each then concatenate.
+  // Uses stream copy (-c copy): zero quality loss, preserves resolution,
+  // rotation metadata, aspect ratio, frame rate — everything.
   // Trade-off: cuts snap to the nearest keyframe (±0.5s), acceptable for highlights.
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
