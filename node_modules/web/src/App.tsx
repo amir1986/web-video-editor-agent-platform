@@ -57,6 +57,7 @@ export default function App() {
     if (!videoRef.current || !activeClip) return;
     setAgentLoading(true);
     setAgentSummary(null);
+    setExportDone(false);
     try {
       const frames = await extractFrames(videoRef.current, 10);
       const res = await fetch("http://localhost:3001/api/ai/suggest", {
@@ -65,53 +66,38 @@ export default function App() {
         body: JSON.stringify({ duration, frames }),
       });
       const data = await res.json();
+
+      let newInOut = state.inOut;
       if (data?.editPlan?.timelineOps) {
         for (const op of data.editPlan.timelineOps) {
           if (op.op === "setInOut") {
-            save({ ...state, inOut: { in: op.in, out: op.out } });
+            newInOut = { in: op.in, out: op.out };
+            save({ ...state, inOut: newInOut });
           }
         }
       }
-      const summary = data?.editPlan?.summary || "Done";
-      setAgentSummary(summary);
 
-      // אוטומטית מוריד אחרי שה-AI בחר
-      if (data?.editPlan?.timelineOps) {
-        const op = data.editPlan.timelineOps.find((o: any) => o.op === "setInOut");
-        if (op && activeClip) {
-          setExporting(true);
-          setExportProgress(0);
-          const name = activeClip.name.replace(/\.[^/.]+$/, "");
-          await exportTrimmed(activeClip.url, op.in, op.out, `${name}_highlight.mp4`, setExportProgress);
-          setExportDone(true);
-          setExporting(false);
-        }
-      }
-    } catch {
-      setAgentSummary(" API not running. Start apps/api on port 3001.");
-    }
-    setAgentLoading(false);
-  };
+      setAgentSummary(data?.editPlan?.summary || "Done");
 
-  const handleExport = async () => {
-    if (!activeClip) return;
-    setExporting(true);
-    setExportDone(false);
-    setExportProgress(0);
-    try {
+      // הורד אוטומטית
+      setExporting(true);
+      setExportProgress(0);
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
-      await exportTrimmed(activeClip.url, state.inOut.in, state.inOut.out, `${name}_edited.mp4`, setExportProgress);
+      await exportTrimmed(activeClip.url, newInOut.in, newInOut.out, `${name}_highlight.mp4`, setExportProgress);
       setExportDone(true);
+      setExporting(false);
+
     } catch (err) {
       console.error(err);
+      setAgentSummary("Error - check console");
+      setExporting(false);
     }
-    setExporting(false);
+    setAgentLoading(false);
   };
 
   return (
     <div className="app">
 
-      {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="logo"> VideoAgent</div>
 
@@ -137,25 +123,21 @@ export default function App() {
 
         <div className="spacer" />
 
-  {fmt(state.inOut.out)}</span>
-              <span className="export-dur">{fmt(state.inOut.out - state.inOut.in)}</span>
+        {exporting && (
+          <div className="export-box">
+            <div className="section-label">Exporting...</div>
+            <div className="progress-wrap">
+              <div className="progress-bar"><div className="progress-fill" style={{ width: `${exportProgress}%` }} /></div>
+              <div className="progress-label">{exportProgress}%</div>
             </div>
-            {exporting ? (
-              <div className="progress-wrap">
-                <div className="progress-bar"><div className="progress-fill" style={{ width: `${exportProgress}%` }} /></div>
-                <div className="progress-label">{exportProgress}%</div>
-              </div>
-            ) : (
-              <button className="export-btn" onClick={handleExport}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                {exportDone ? " Downloaded!" : "Export & Download"}
-              </button>
-            )}
           </div>
+        )}
+
+        {exportDone && !exporting && (
+          <div className="export-done-box"> Download started!</div>
         )}
       </aside>
 
-      {/* MAIN */}
       <main className="main">
         <div className="preview-area">
           <div className="preview-header">
@@ -221,7 +203,6 @@ export default function App() {
         </div>
       </main>
 
-      {/* AGENT PANEL */}
       <aside className="agent-panel">
         <div className="agent-header">
           <span className="pulse" />
@@ -231,16 +212,18 @@ export default function App() {
 
         <div className="agent-body">
           <div className="agent-desc">
-            Qwen will analyze your video frames and automatically find the best highlight moment to keep.
+            Qwen will analyze your video frames and automatically find the best highlight moment, then download it.
           </div>
 
           <button
-            className={`auto-edit-btn ${agentLoading ? "loading" : ""}`}
+            className={`auto-edit-btn ${agentLoading || exporting ? "loading" : ""}`}
             onClick={handleAutoEdit}
-            disabled={agentLoading || !activeClip}
+            disabled={agentLoading || exporting || !activeClip}
           >
             {agentLoading ? (
               <><span className="spinner" /> Analyzing frames...</>
+            ) : exporting ? (
+              <><span className="spinner" /> Exporting {exportProgress}%...</>
             ) : (
               <><span></span> Auto Edit with Vision</>
             )}
@@ -261,5 +244,3 @@ export default function App() {
     </div>
   );
 }
-
-
