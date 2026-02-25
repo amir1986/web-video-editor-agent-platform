@@ -1,6 +1,7 @@
 const TelegramBot = require("node-telegram-bot-api");
 const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
+const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -21,6 +22,83 @@ const MAX_BOT_API_DOWNLOAD = 20 * 1024 * 1024; // 20MB - getFile limit
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;       // 50MB - sendVideo/sendDocument limit
 
 const bot = new TelegramBot(TOKEN, { polling: true });
+
+// --- ffmpeg helpers (for compressing output to fit Telegram's 50MB upload limit) ---
+function toWslPath(p) {
+  if (process.platform === "win32") {
+    return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+  }
+  return p;
+}
+
+function ffmpegExec(args) {
+  const cmd = process.platform === "win32"
+    ? `wsl -d Ubuntu-24.04 -- ffmpeg ${args}`
+    : `ffmpeg ${args}`;
+  return new Promise((resolve, reject) => {
+    exec(cmd, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout);
+    });
+  });
+}
+
+function ffprobeExec(args) {
+  const cmd = process.platform === "win32"
+    ? `wsl -d Ubuntu-24.04 -- ffprobe ${args}`
+    : `ffprobe ${args}`;
+  return new Promise((resolve, reject) => {
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+/**
+ * Compress video to fit within maxBytes using ffmpeg.
+ * Only used for Telegram's 50MB upload limit - other platforms are not limited.
+ */
+async function compressForTelegram(inputPath, outputPath, maxBytes) {
+  const wslIn = toWslPath(inputPath);
+  const wslOut = toWslPath(outputPath);
+
+  const durationStr = await ffprobeExec(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
+  const duration = parseFloat(durationStr);
+  if (!duration || duration <= 0) {
+    throw new Error("Could not determine video duration for compression");
+  }
+
+  // Target with 5% safety margin
+  const targetBytes = maxBytes * 0.95;
+  const audioBitrate = 128 * 1024; // 128kbps
+  const totalBitrate = (targetBytes * 8) / duration;
+  const videoBitrate = Math.floor(totalBitrate - audioBitrate);
+
+  if (videoBitrate < 100 * 1024) {
+    throw new Error("Video too long to compress under 50MB with acceptable quality");
+  }
+
+  const vbr = Math.floor(videoBitrate / 1000) + "k";
+  const bufsize = Math.floor((videoBitrate * 2) / 1000) + "k";
+  console.log(`[COMPRESS] duration=${duration.toFixed(1)}s, target=${(targetBytes / 1024 / 1024).toFixed(1)}MB, vbr=${vbr}`);
+
+  await ffmpegExec(`-y -i "${wslIn}" -c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 128k -preset medium "${wslOut}"`);
+
+  // Check if output fits; if still too large, retry with proportionally lower bitrate
+  const outSize = fs.statSync(outputPath).size;
+  console.log(`[COMPRESS] First pass output: ${(outSize / 1024 / 1024).toFixed(1)}MB`);
+
+  if (outSize > maxBytes) {
+    const ratio = targetBytes / outSize;
+    const adjustedVbr = Math.floor((videoBitrate * ratio) / 1000) + "k";
+    const adjustedBuf = Math.floor((videoBitrate * ratio * 2) / 1000) + "k";
+    console.log(`[COMPRESS] Still too large, retrying with vbr=${adjustedVbr}`);
+    await ffmpegExec(`-y -i "${wslIn}" -c:v libx264 -b:v ${adjustedVbr} -maxrate ${adjustedVbr} -bufsize ${adjustedBuf} -c:a aac -b:a 128k -preset medium "${wslOut}"`);
+    const finalSize = fs.statSync(outputPath).size;
+    console.log(`[COMPRESS] Second pass output: ${(finalSize / 1024 / 1024).toFixed(1)}MB`);
+  }
+}
 
 // --- MTProto client for large file downloads (bypasses 20MB limit) ---
 let mtClient = null;
@@ -117,6 +195,7 @@ bot.on("video", async (msg) => {
   const statusMsg = await bot.sendMessage(chatId, "Downloading video...");
   const tmpIn = path.join(os.tmpdir(), `tg_${crypto.randomBytes(6).toString("hex")}.mp4`);
   const tmpOut = path.join(os.tmpdir(), `tg_out_${crypto.randomBytes(6).toString("hex")}.mp4`);
+  const tmpCompressed = path.join(os.tmpdir(), `tg_comp_${crypto.randomBytes(6).toString("hex")}.mp4`);
 
   try {
     // Download video from Telegram (auto-selects Bot API or MTProto based on size)
@@ -152,30 +231,35 @@ bot.on("video", async (msg) => {
     const summary = res.headers.get("x-ai-summary") || "";
     const segCount = res.headers.get("x-segments-count") || "?";
 
-    // Check output file size before sending
+    // Compress if needed (Telegram-only 50MB limit) and send
+    let fileToSend = tmpOut;
+    let compressed = false;
     const outSize = fs.statSync(tmpOut).size;
 
     if (outSize > MAX_UPLOAD_SIZE) {
       const outMB = (outSize / (1024 * 1024)).toFixed(1);
+      console.log(`[VIDEO] Output ${outMB}MB > 50MB, compressing for Telegram...`);
       await bot.editMessageText(
-        `Done! ${segCount} highlights found, but the output (${outMB}MB) exceeds Telegram's 50MB limit.\n${summary}`,
+        `Compressing video (${outMB}MB) to fit Telegram's 50MB limit...`,
         { chat_id: chatId, message_id: statusMsg.message_id }
       );
-      return;
+      await compressForTelegram(tmpOut, tmpCompressed, MAX_UPLOAD_SIZE);
+      fileToSend = tmpCompressed;
+      compressed = true;
     }
 
+    const compNote = compressed ? " (compressed for Telegram)" : "";
     await bot.editMessageText(
-      `Done! ${segCount} highlights found.\n${summary}`,
+      `Done! ${segCount} highlights found${compNote}.\n${summary}`,
       { chat_id: chatId, message_id: statusMsg.message_id }
     );
 
-    // Send edited video back; fall back to document if sendVideo fails
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
-      await bot.sendVideo(chatId, tmpOut, { caption });
+      await bot.sendVideo(chatId, fileToSend, { caption });
     } catch (sendErr) {
       console.log(`[DEBUG] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
-      await bot.sendDocument(chatId, tmpOut, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
+      await bot.sendDocument(chatId, fileToSend, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
     }
   } catch (err) {
     console.error("Bot error:", err);
@@ -186,6 +270,7 @@ bot.on("video", async (msg) => {
   } finally {
     try { fs.unlinkSync(tmpIn); } catch {}
     try { fs.unlinkSync(tmpOut); } catch {}
+    try { fs.unlinkSync(tmpCompressed); } catch {}
   }
 });
 
@@ -202,9 +287,9 @@ bot.on("document", async (msg) => {
   const statusMsg = await bot.sendMessage(chatId, "Downloading video...");
   const tmpIn = path.join(os.tmpdir(), `tg_${crypto.randomBytes(6).toString("hex")}.mp4`);
   const tmpOut = path.join(os.tmpdir(), `tg_out_${crypto.randomBytes(6).toString("hex")}.mp4`);
+  const tmpCompressed = path.join(os.tmpdir(), `tg_comp_${crypto.randomBytes(6).toString("hex")}.mp4`);
 
   try {
-    // Download video from Telegram (auto-selects Bot API or MTProto based on size)
     await downloadTelegramFile(doc.file_id, doc.file_size, chatId, msg.message_id, tmpIn);
 
     await bot.editMessageText("Processing with AI... this may take a minute.", {
@@ -235,30 +320,35 @@ bot.on("document", async (msg) => {
     const summary = res.headers.get("x-ai-summary") || "";
     const segCount = res.headers.get("x-segments-count") || "?";
 
-    // Check output file size before sending
+    // Compress if needed (Telegram-only 50MB limit) and send
+    let fileToSend = tmpOut;
+    let compressed = false;
     const outSize = fs.statSync(tmpOut).size;
 
     if (outSize > MAX_UPLOAD_SIZE) {
       const outMB = (outSize / (1024 * 1024)).toFixed(1);
+      console.log(`[DOC] Output ${outMB}MB > 50MB, compressing for Telegram...`);
       await bot.editMessageText(
-        `Done! ${segCount} highlights found, but the output (${outMB}MB) exceeds Telegram's 50MB limit.\n${summary}`,
+        `Compressing video (${outMB}MB) to fit Telegram's 50MB limit...`,
         { chat_id: chatId, message_id: statusMsg.message_id }
       );
-      return;
+      await compressForTelegram(tmpOut, tmpCompressed, MAX_UPLOAD_SIZE);
+      fileToSend = tmpCompressed;
+      compressed = true;
     }
 
+    const compNote = compressed ? " (compressed for Telegram)" : "";
     await bot.editMessageText(
-      `Done! ${segCount} highlights found.\n${summary}`,
+      `Done! ${segCount} highlights found${compNote}.\n${summary}`,
       { chat_id: chatId, message_id: statusMsg.message_id }
     );
 
-    // Send edited video back; fall back to document if sendVideo fails
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
-      await bot.sendVideo(chatId, tmpOut, { caption });
+      await bot.sendVideo(chatId, fileToSend, { caption });
     } catch (sendErr) {
       console.log(`[DEBUG] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
-      await bot.sendDocument(chatId, tmpOut, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
+      await bot.sendDocument(chatId, fileToSend, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
     }
   } catch (err) {
     console.error("Bot error:", err);
@@ -269,5 +359,6 @@ bot.on("document", async (msg) => {
   } finally {
     try { fs.unlinkSync(tmpIn); } catch {}
     try { fs.unlinkSync(tmpOut); } catch {}
+    try { fs.unlinkSync(tmpCompressed); } catch {}
   }
 });
