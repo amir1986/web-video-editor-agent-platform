@@ -1,0 +1,9 @@
+{
+  "description": "Add a title with invalid time",
+  "request": "Add a title 'Test' at -5 seconds",
+  "expected_outcome": "An error response due to invalid title time",
+  "constraints": {
+    "title_text": {"min_length": 1, "max_length": 100},
+    "title_time": {"min": 0, "max": 100}
+  }
+}

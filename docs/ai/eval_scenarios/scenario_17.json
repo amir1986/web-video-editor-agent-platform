@@ -1,0 +1,9 @@
+{
+  "description": "Add a title with minimum length",
+  "request": "Add a title 'A' at 5 seconds",
+  "expected_outcome": "A title with text 'A' at 5 seconds",
+  "constraints": {
+    "title_text": {"min_length": 1, "max_length": 100},
+    "title_time": {"min": 0, "max": 100}
+  }
+}

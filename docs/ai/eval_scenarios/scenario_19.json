@@ -1,0 +1,10 @@
+{
+  "description": "Add multiple titles in chronological order",
+  "request": "Add titles 'First' at 5 seconds, 'Second' at 10 seconds, and 'Third' at 15 seconds",
+  "expected_outcome": "Three titles with texts 'First', 'Second', and 'Third' at 5, 10, and 15 seconds respectively",
+  "constraints": {
+    "title_texts": {"min_length": 1, "max_length": 100},
+    "title_times": {"min": 0, "max": 100},
+    "sorted": true
+  }
+}

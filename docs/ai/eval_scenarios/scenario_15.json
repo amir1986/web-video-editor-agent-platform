@@ -1,0 +1,10 @@
+{
+  "description": "Add titles in reverse chronological order",
+  "request": "Add titles 'Second' at 10 seconds and 'First' at 5 seconds",
+  "expected_outcome": "Two titles with texts 'Second' and 'First' at 10 and 5 seconds respectively",
+  "constraints": {
+    "title_texts": {"min_length": 1, "max_length": 100},
+    "title_times": {"min": 0, "max": 100},
+    "sorted": true
+  }
+}

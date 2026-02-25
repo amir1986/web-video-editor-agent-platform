@@ -1,0 +1,10 @@
+{
+  "description": "Add multiple titles with overlapping times",
+  "request": "Add titles 'First' at 5 seconds, 'Second' at 7 seconds, and 'Third' at 6 seconds",
+  "expected_outcome": "Three titles with texts 'First', 'Second', and 'Third' at 5, 7, and 6 seconds respectively",
+  "constraints": {
+    "title_texts": {"min_length": 1, "max_length": 100},
+    "title_times": {"min": 0, "max": 100},
+    "no_overlap": true
+  }
+}

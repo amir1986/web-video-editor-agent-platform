@@ -1,0 +1,10 @@
+{
+  "description": "Trim a video to a specific time range",
+  "request": "Trim the video to start at 10 seconds and end at 30 seconds",
+  "expected_outcome": "A trimmed video with in marker at 10 seconds and out marker at 30 seconds",
+  "constraints": {
+    "in_marker": {"min": 0, "max": 100},
+    "out_marker": {"min": 0, "max": 100},
+    "in_before_out": true
+  }
+}
