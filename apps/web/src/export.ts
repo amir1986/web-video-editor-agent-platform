@@ -6,22 +6,16 @@
   onProgress: (p: number) => void
 ): Promise<void> {
   onProgress(10);
-
   const videoRes = await fetch(videoUrl);
   const videoBlob = await videoRes.blob();
   onProgress(30);
 
-  const formData = new FormData();
-  formData.append("video", videoBlob, "input.mp4");
-
-  const res = await fetch(`http://localhost:3001/api/export?in=${inSec}&out=${outSec}`, {
-    method: "POST",
-    body: videoBlob,
-    headers: { "Content-Type": "video/mp4" },
-  });
+  const res = await fetch(
+    `http://localhost:3001/api/trim?in=${inSec}&out=${outSec}&name=${encodeURIComponent(filename.replace(".mp4",""))}`,
+    { method: "POST", body: videoBlob, headers: { "Content-Type": "video/mp4" } }
+  );
 
   onProgress(80);
-
   if (!res.ok) throw new Error(await res.text());
 
   const blob = await res.blob();
