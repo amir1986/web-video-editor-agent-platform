@@ -1,0 +1,10 @@
+{
+  "description": "Add multiple titles to the video",
+  "request": "Add titles 'Intro' at 2 seconds and 'Conclusion' at 45 seconds",
+  "expected_outcome": "Two titles with texts 'Intro' and 'Conclusion' at 2 and 45 seconds respectively",
+  "constraints": {
+    "title_texts": {"min_length": 1, "max_length": 100},
+    "title_times": {"min": 0, "max": 100},
+    "no_overlap": true
+  }
+}

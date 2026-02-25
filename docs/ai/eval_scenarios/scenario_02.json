@@ -1,0 +1,9 @@
+{
+  "description": "Add a title to the video",
+  "request": "Add a title 'Welcome to my video' at 5 seconds",
+  "expected_outcome": "A title with text 'Welcome to my video' at 5 seconds",
+  "constraints": {
+    "title_text": {"min_length": 1, "max_length": 100},
+    "title_time": {"min": 0, "max": 100}
+  }
+}

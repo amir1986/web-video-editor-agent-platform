@@ -1,0 +1,10 @@
+{
+  "description": "Trim a video with valid markers",
+  "request": "Trim the video to start at 15 seconds and end at 45 seconds",
+  "expected_outcome": "A trimmed video with in marker at 15 seconds and out marker at 45 seconds",
+  "constraints": {
+    "in_marker": {"min": 0, "max": 100},
+    "out_marker": {"min": 0, "max": 100},
+    "in_before_out": true
+  }
+}

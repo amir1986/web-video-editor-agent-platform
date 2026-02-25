@@ -1,0 +1,9 @@
+{
+  "description": "Add a title with maximum length",
+  "request": "Add a title 'This is a very long title that should be at the maximum allowed length' at 5 seconds",
+  "expected_outcome": "A title with text 'This is a very long title that should be at the maximum allowed length' at 5 seconds",
+  "constraints": {
+    "title_text": {"min_length": 1, "max_length": 50},
+    "title_time": {"min": 0, "max": 100}
+  }
+}

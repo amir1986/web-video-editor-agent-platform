@@ -1,0 +1,10 @@
+{
+  "description": "Trim a video with invalid in marker",
+  "request": "Trim the video to start at -5 seconds and end at 30 seconds",
+  "expected_outcome": "An error response due to invalid in marker",
+  "constraints": {
+    "in_marker": {"min": 0, "max": 100},
+    "out_marker": {"min": 0, "max": 100},
+    "in_before_out": true
+  }
+}
