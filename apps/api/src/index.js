@@ -129,7 +129,7 @@ async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c:v libx264 -c:a aac -preset slow -crf 18 -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c:v libx264 -c:a aac -preset medium -crf 23 -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
   const concatFile = path.join(tmpDir, "concat.txt");
