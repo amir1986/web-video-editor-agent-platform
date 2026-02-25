@@ -7,10 +7,9 @@ export async function loadFFmpeg(onProgress: (p: number) => void): Promise<FFmpe
   if (ffmpeg?.loaded) return ffmpeg;
   ffmpeg = new FFmpeg();
   ffmpeg.on("progress", ({ progress }) => onProgress(Math.round(progress * 100)));
-  const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
   await ffmpeg.load({
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
+    coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
+    wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
   });
   return ffmpeg;
 }
