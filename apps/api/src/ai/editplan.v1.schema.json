@@ -2,24 +2,67 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "title": "EditPlan",
-  "description": "A plan of operations to apply to a project state",
+  "description": "Multi-agent video editing plan. Produced by Cut → Structure → Continuity → Transition → Constraints pipeline.",
   "additionalProperties": false,
+  "required": ["render_constraints", "segments", "transitions", "notes"],
   "properties": {
-    "ops": {
+    "render_constraints": {
+      "type": "object",
+      "description": "Hard constraints the renderer must enforce",
+      "required": ["keep_resolution", "keep_aspect_ratio", "no_stretch", "target_width", "target_height"],
+      "properties": {
+        "keep_resolution": { "type": "boolean", "const": true },
+        "keep_aspect_ratio": { "type": "boolean", "const": true },
+        "no_stretch": { "type": "boolean", "const": true },
+        "target_width": { "type": "integer", "minimum": 0, "description": "Original video width in pixels" },
+        "target_height": { "type": "integer", "minimum": 0, "description": "Original video height in pixels" }
+      }
+    },
+    "segments": {
       "type": "array",
-      "description": "List of operations to apply",
+      "description": "Ordered list of source segments to include in the highlight edit",
+      "minItems": 1,
       "items": {
         "type": "object",
+        "required": ["id", "src_in", "src_out"],
         "additionalProperties": false,
-        "required": ["op"],
         "properties": {
-          "op": {
+          "id": { "type": "string", "pattern": "^s\\d+$", "description": "Segment identifier (s1, s2, ...)" },
+          "src_in": { "type": "number", "minimum": 0, "description": "Start time in source video (seconds)" },
+          "src_out": { "type": "number", "minimum": 0, "description": "End time in source video (seconds)" }
+        }
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "description": "Transitions between consecutive segments",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "from": { "type": "string", "description": "ID of the outgoing segment" },
+          "to": { "type": "string", "description": "ID of the incoming segment" },
+          "type": {
             "type": "string",
-            "description": "Operation to perform"
+            "enum": ["hard_cut", "fade", "dissolve", "dip_to_black", "match_cut", "whip_cut", "jump_cut"],
+            "description": "Transition type"
           }
         }
       }
+    },
+    "notes": {
+      "type": "object",
+      "description": "Validation notes from the Constraints Agent",
+      "required": ["constraints_ok"],
+      "properties": {
+        "constraints_ok": { "type": "boolean", "description": "True if all constraints pass" },
+        "issues": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of issues found (empty if constraints_ok is true)"
+        }
+      }
     }
-  },
-  "required": ["ops"]
+  }
 }

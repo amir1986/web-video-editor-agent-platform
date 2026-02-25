@@ -69,163 +69,177 @@ async function extractFrames(wslIn, duration, count) {
   return frames;
 }
 
+// Multi-agent editing pipeline
+const { runEditPipeline } = require("./ai/agents");
+
 /**
- * Build time-based highlight segments when AI is unavailable.
- * Keeps the most interesting portions: intro, middle highlight, and ending.
- * Targets ~40-60% of the original duration.
+ * Probe video dimensions and frame rate via ffprobe.
  */
-function buildFallbackSegments(duration) {
-  if (duration <= 10) {
-    // Very short video: keep first 70%
-    return {
-      segments: [{ in: 0, out: Math.round(duration * 0.7 * 10) / 10, reason: "short video - trimmed ending" }],
-      summary: "Short video - trimmed the ending"
-    };
-  }
-  if (duration <= 30) {
-    // Short video: keep opening + best middle section (skip slow start/end)
-    const seg1End = Math.round(duration * 0.35 * 10) / 10;
-    const seg2Start = Math.round(duration * 0.45 * 10) / 10;
-    const seg2End = Math.round(duration * 0.85 * 10) / 10;
-    return {
-      segments: [
-        { in: 0, out: seg1End, reason: "opening section" },
-        { in: seg2Start, out: seg2End, reason: "main highlight" }
-      ],
-      summary: "Kept the best parts of this short clip"
-    };
-  }
-  // Longer video: pick 3-4 segments from different parts
-  const segDur = duration * 0.15; // each segment ~15% of total
-  const segments = [];
-  // Opening hook (first 15%)
-  segments.push({ in: 0, out: Math.round(segDur * 10) / 10, reason: "opening hook" });
-  // Early highlight (around 25-40%)
-  const s2Start = Math.round(duration * 0.25 * 10) / 10;
-  segments.push({ in: s2Start, out: Math.round((s2Start + segDur) * 10) / 10, reason: "early highlight" });
-  // Mid highlight (around 50-65%)
-  const s3Start = Math.round(duration * 0.50 * 10) / 10;
-  segments.push({ in: s3Start, out: Math.round((s3Start + segDur) * 10) / 10, reason: "mid highlight" });
-  // Closing (last 10%)
-  const closeStart = Math.round(duration * 0.85 * 10) / 10;
-  segments.push({ in: closeStart, out: Math.round(duration * 10) / 10, reason: "closing moment" });
-  return {
-    segments,
-    summary: "Auto-generated highlights from key moments"
-  };
-}
-
-async function analyzeWithAI(frames, duration) {
-  const timestamps = frames.map(f => `${f.timestamp}s`).join(", ");
-
-  // Build a strong, explicit prompt for highlight extraction
-  const textPrompt = `You are a professional video editor creating a HIGHLIGHT REEL. Your job is to CUT the video down to only the best moments.
-
-VIDEO INFO: Total duration = ${duration.toFixed(1)} seconds. Frame timestamps: ${timestamps}.
-
-RULES:
-1. You MUST select between 2 and 6 segments that together cover 30%-60% of the original duration.
-2. The total kept duration MUST be LESS than ${(duration * 0.65).toFixed(1)} seconds.
-3. Each segment needs "in" (start time) and "out" (end time) in seconds.
-4. CUT OUT: intros, outros, dead air, repetitive parts, pauses, filler.
-5. KEEP: action moments, key points, interesting visuals, emotional peaks, humor.
-6. Segments must not overlap and must be sorted by "in" time.
-
-EXAMPLE for a 60-second video:
-{"segments":[{"in":0,"out":8,"reason":"strong opening"},{"in":15,"out":28,"reason":"main action"},{"in":42,"out":55,"reason":"climax and ending"}],"summary":"Cut from 60s to 34s keeping the best action"}
-
-Now analyze this ${duration.toFixed(1)}-second video and return ONLY valid JSON (no other text):
-{"segments":[{"in":<seconds>,"out":<seconds>,"reason":"<why>"}],"summary":"<one sentence>"}`;
-
-  const contentWithImages = [
-    { type: "text", text: textPrompt },
-    ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))
-  ];
-
-  const tryRequest = async (content) => {
-    const res = await fetch("http://localhost:11434/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: process.env.VISION_MODEL || "qwen2.5vl:7b", messages: [{ role: "user", content }], temperature: 0, stream: false })
-    });
-    const data = await res.json();
-    const text = data.choices?.[0]?.message?.content || "";
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("AI no JSON: " + text.slice(0, 300));
-    const parsed = JSON.parse(match[0]);
-    // If AI says it can't see images, throw so we retry text-only
-    if (!parsed.segments?.length && text.toLowerCase().includes("missing visual")) {
-      throw new Error("vision_not_supported");
-    }
-    return parsed;
-  };
-
+async function probeVideoMeta(wslIn, duration) {
   try {
-    const result = await tryRequest(contentWithImages);
-    return result;
-  } catch (err) {
-    if (err.message === "vision_not_supported" || err.message.includes("missing visual")) {
-      console.log("Vision not supported, retrying text-only...");
-      try {
-        return await tryRequest(textPrompt);
-      } catch (textErr) {
-        console.log("Text-only AI also failed, using time-based fallback:", textErr.message);
-        return buildFallbackSegments(duration);
-      }
+    const json = await ffprobe(`-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of json "${wslIn}"`);
+    const data = JSON.parse(json);
+    const stream = data.streams?.[0] || {};
+    let fps = 30;
+    if (stream.r_frame_rate) {
+      const [num, den] = stream.r_frame_rate.split("/").map(Number);
+      if (num && den) fps = Math.round(num / den);
     }
-    // If AI is completely unavailable (connection refused, etc.), use fallback
-    if (err.message.includes("ECONNREFUSED") || err.message.includes("fetch failed") || err.message.includes("AI no JSON")) {
-      console.log("AI unavailable, using time-based fallback:", err.message);
-      return buildFallbackSegments(duration);
-    }
-    throw err;
+    return { duration, fps, width: stream.width || 0, height: stream.height || 0 };
+  } catch {
+    return { duration, fps: 30, width: 0, height: 0 };
   }
 }
 
-async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
-  // Single segment: extract directly to output (no concat needed)
-  if (segments.length === 1) {
+/**
+ * Render an EditPlan to a video file.
+ *
+ * Uses stream copy for hard_cut transitions (zero quality loss).
+ * Requires re-encode only for segments with soft transitions (fade, dissolve, dip_to_black).
+ * When re-encoding for transitions, preserves original resolution exactly.
+ */
+async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
+  const segments = editPlan.segments || [];
+  if (!segments.length) throw new Error("EditPlan has no segments");
+
+  // Build a lookup of transitions by source segment id
+  const transMap = {};
+  for (const t of (editPlan.transitions || [])) {
+    transMap[t.from] = t;
+  }
+
+  const needsReencode = (editPlan.transitions || []).some(t => t.type !== "hard_cut");
+
+  // Single segment, no soft transitions — stream copy
+  if (segments.length === 1 && !needsReencode) {
     const seg = segments[0];
-    console.log(`[STITCH] Single segment: ${seg.in}s → ${seg.out}s (stream copy)`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
+    console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
+    await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
     return;
   }
 
-  // Multiple segments: extract each then concatenate.
-  // Uses stream copy (-c copy): zero quality loss, preserves resolution,
-  // rotation metadata, aspect ratio, frame rate — everything.
-  // Trade-off: cuts snap to the nearest keyframe (±0.5s), acceptable for highlights.
+  // All hard cuts — stream copy concat (fast, lossless)
+  if (!needsReencode) {
+    const segFiles = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const segPath = path.join(tmpDir, `seg_${i}.mp4`);
+      console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
+      await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+      segFiles.push(segPath);
+    }
+    const concatFile = path.join(tmpDir, "concat.txt");
+    fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
+    await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+    for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
+    return;
+  }
+
+  // Has soft transitions — need to re-encode with filter_complex.
+  // Build ffmpeg filter_complex for xfade transitions.
+  // Preserves resolution exactly (no scale filters).
+  const FADE_DURATION = 0.5; // seconds for transition overlap
+
+  // Extract each segment to its own file first
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    console.log(`[STITCH] Segment ${i}: ${seg.in}s → ${seg.out}s (stream copy)`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s`);
+    await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
-  const concatFile = path.join(tmpDir, "concat.txt");
-  fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-  await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
-  for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
+
+  // Build inputs
+  const inputs = segFiles.map(f => `-i "${toWslPath(f)}"`).join(" ");
+
+  // Build xfade filter chain
+  // xfade types: fade, wipeleft, dissolve, etc.
+  const xfadeType = (type) => {
+    switch (type) {
+      case "dissolve": return "dissolve";
+      case "fade": return "fade";
+      case "dip_to_black": return "fadeblack";
+      case "wipe": return "wipeleft";
+      default: return "fade";
+    }
+  };
+
+  // Calculate segment durations for offset computation
+  const segDurations = segments.map(s => s.src_out - s.src_in);
+
+  // Build the filter chain progressively
+  let filterParts = [];
+  let audioParts = [];
+  let lastVideoLabel = "[0:v]";
+  let lastAudioLabel = "[0:a]";
+  let cumulativeOffset = segDurations[0];
+
+  for (let i = 0; i < segments.length - 1; i++) {
+    const trans = transMap[segments[i].id];
+    const tType = trans?.type || "hard_cut";
+
+    if (tType === "hard_cut") {
+      // For hard cuts in a mixed chain, use concat filter
+      const outLabel = `[v${i + 1}]`;
+      const aOutLabel = `[a${i + 1}]`;
+      filterParts.push(`${lastVideoLabel}[${i + 1}:v]concat=n=2:v=1:a=0${outLabel}`);
+      audioParts.push(`${lastAudioLabel}[${i + 1}:a]concat=n=2:v=0:a=1${aOutLabel}`);
+      lastVideoLabel = outLabel;
+      lastAudioLabel = aOutLabel;
+    } else {
+      // Soft transition via xfade
+      const offset = Math.max(0, cumulativeOffset - FADE_DURATION);
+      const outLabel = `[v${i + 1}]`;
+      const aOutLabel = `[a${i + 1}]`;
+      filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${FADE_DURATION}:offset=${offset.toFixed(3)}${outLabel}`);
+      audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${FADE_DURATION}${aOutLabel}`);
+      lastVideoLabel = outLabel;
+      lastAudioLabel = aOutLabel;
+      cumulativeOffset -= FADE_DURATION; // xfade overlaps
+    }
+    cumulativeOffset += segDurations[i + 1];
+  }
+
+  if (filterParts.length > 0) {
+    const filterComplex = [...filterParts, ...audioParts].join(";");
+    console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} filters`);
+    try {
+      await ffmpeg(`-y ${inputs} -filter_complex "${filterComplex}" -map "${lastVideoLabel}" -map "${lastAudioLabel}" -c:v libx264 -crf 18 -preset medium -c:a aac -b:a 192k -movflags +faststart "${wslOut}"`);
+    } catch (filterErr) {
+      // If filter_complex fails (e.g., no audio streams), fall back to simple concat
+      console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
+      const concatFile = path.join(tmpDir, "concat.txt");
+      fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
+      await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+    }
+  } else {
+    // No transitions at all (shouldn't happen, but safety)
+    const concatFile = path.join(tmpDir, "concat.txt");
+    fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
+    await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+  }
+
+  for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
 }
 
-//  POST /api/analyze 
+//  POST /api/analyze — multi-agent EditPlan (web client)
 app.post("/api/analyze", async (req, res) => {
-  const { duration, frames } = req.body;
+  const { duration, frames, width, height, fps } = req.body;
   try {
     const frameData = (frames || []).map((f, i) => ({
       timestamp: Math.round((duration / frames.length) * i * 10) / 10,
       base64: f
     }));
-    const plan = await analyzeWithAI(frameData, duration);
-    const firstSeg = plan.segments?.[0];
+    const videoMeta = { duration, fps: fps || 30, width: width || 0, height: height || 0 };
+    const editPlan = await runEditPipeline(videoMeta, frameData);
+
+    // Backward-compatible response: include editPlan + legacy fields
+    const firstSeg = editPlan.segments?.[0];
     res.json({
-      editPlan: {
-        timelineOps: firstSeg ? [{ op: "setInOut", in: firstSeg.in, out: firstSeg.out }] : [],
-        summary: plan.summary || "Done"
-      },
-      segments: plan.segments,
-      summary: plan.summary
+      editPlan,
+      segments: editPlan.segments,
+      summary: `${editPlan.segments.length} highlights selected`,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -253,7 +267,7 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   }
 });
 
-//  POST /api/auto-edit 
+//  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
 app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   const name   = req.query.name || "video";
   const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
@@ -263,48 +277,35 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     fs.writeFileSync(tmpIn, req.body);
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
+    // Probe video metadata
     const durationStr = await ffprobe(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
     const duration = parseFloat(durationStr);
+    const videoMeta = await probeVideoMeta(wslIn, duration);
+    console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
 
+    // Extract frames for vision analysis
     const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
-    console.log(`Extracting ${frameCount} frames from ${duration.toFixed(1)}s...`);
+    console.log(`[AUTO-EDIT] Extracting ${frameCount} frames...`);
     const frames = await extractFrames(wslIn, duration, frameCount);
 
-    console.log("AI analyzing...");
-    let plan;
-    try {
-      plan = await analyzeWithAI(frames, duration);
-    } catch (aiErr) {
-      console.log("AI analysis failed, using time-based fallback:", aiErr.message);
-      plan = buildFallbackSegments(duration);
-    }
-    console.log(`AI found ${plan.segments?.length} segments:`, plan.summary);
+    // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
+    console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
+    const editPlan = await runEditPipeline(videoMeta, frames);
 
-    let rawSegments = (plan.segments || [])
-      .filter(s => typeof s.in === "number" && typeof s.out === "number" && s.out > s.in)
-      .map(s => ({ in: Math.max(0, s.in), out: Math.min(duration, s.out), reason: s.reason || "highlight" }))
-      .sort((a, b) => a.in - b.in);
+    const segments = editPlan.segments || [];
+    const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+    console.log(`[AUTO-EDIT] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
 
-    // Validate: total kept duration must be < 90% of original (otherwise AI returned near-full video)
-    const totalKept = rawSegments.reduce((sum, s) => sum + (s.out - s.in), 0);
-    if (!rawSegments.length || totalKept >= duration * 0.90) {
-      console.log(`[AUTO-EDIT] Segments invalid or cover ${(totalKept / duration * 100).toFixed(0)}% of video — using time-based fallback`);
-      const fallback = buildFallbackSegments(duration);
-      rawSegments = fallback.segments;
-      plan.summary = fallback.summary;
-    }
+    // Render the EditPlan to video
+    console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
+    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir);
 
-    const segments = rawSegments;
-    const finalDuration = segments.reduce((sum, s) => sum + (s.out - s.in), 0);
-    console.log(`[AUTO-EDIT] Keeping ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
-
-    console.log(`Stitching ${segments.length} segments...`);
-    await stitchSegments(wslIn, segments, wslOut, tmpDir);
-
+    const summary = `${segments.length} highlights selected`;
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
-    res.set("X-AI-Summary", plan.summary || "");
+    res.set("X-AI-Summary", summary);
     res.set("X-Segments-Count", String(segments.length));
+    res.set("X-Edit-Plan", JSON.stringify(editPlan));
     res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
   } catch (err) {
     cleanup(tmpIn, tmpOut);
