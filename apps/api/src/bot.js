@@ -280,6 +280,14 @@ bot.on("video", async (msg) => {
   }
 });
 
+// Graceful shutdown — disconnect MTProto client
+async function shutdown() {
+  if (mtClient) { try { await mtClient.disconnect(); } catch {} }
+  process.exit(0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
 // Also handle video sent as document (for large files)
 bot.on("document", async (msg) => {
   const doc = msg.document;

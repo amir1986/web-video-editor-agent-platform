@@ -54,19 +54,24 @@ function ffprobe(args) {
 }
 
 async function extractFrames(wslIn, duration, count) {
+  if (!count || count <= 0) count = 1;
+  if (!duration || duration <= 0) return [];
   const framesDir = path.join(os.tmpdir(), `frames_${crypto.randomBytes(4).toString("hex")}`);
   fs.mkdirSync(framesDir);
   const interval = duration / count;
-  // scale=320:-2 preserves original aspect ratio (height auto-calculated, divisible by 2)
-  await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
-  const frames = fs.readdirSync(framesDir)
-    .filter(f => f.endsWith(".jpg")).sort()
-    .map((f, i) => ({
-      timestamp: Math.round(interval * i * 10) / 10,
-      base64: `data:image/jpeg;base64,${fs.readFileSync(path.join(framesDir, f)).toString("base64")}`
-    }));
-  fs.rmSync(framesDir, { recursive: true });
-  return frames;
+  try {
+    // scale=320:-2 preserves original aspect ratio (height auto-calculated, divisible by 2)
+    await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
+    const frames = fs.readdirSync(framesDir)
+      .filter(f => f.endsWith(".jpg")).sort()
+      .map((f, i) => ({
+        timestamp: Math.round(interval * i * 10) / 10,
+        base64: `data:image/jpeg;base64,${fs.readFileSync(path.join(framesDir, f)).toString("base64")}`
+      }));
+    return frames;
+  } finally {
+    try { fs.rmSync(framesDir, { recursive: true }); } catch {}
+  }
 }
 
 // Multi-agent editing pipeline
@@ -136,11 +141,11 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   }
 
   // Has soft transitions — need to re-encode with filter_complex.
-  // Build ffmpeg filter_complex for xfade transitions.
-  // Preserves resolution exactly (no scale filters).
-  const FADE_DURATION = 0.5; // seconds for transition overlap
+  // Uses xfade for ALL transitions when soft transitions are present
+  // (hard_cut becomes a very short fade to keep the filter graph uniform).
+  const FADE_DURATION = 0.5; // seconds for soft transition overlap
 
-  // Extract each segment to its own file first
+  // Extract each segment to its own re-encoded file (needed for uniform filter graph)
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
@@ -150,11 +155,17 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     segFiles.push(segPath);
   }
 
+  // Probe whether the first segment has audio
+  let hasAudio = false;
+  try {
+    const audioProbe = await ffprobe(`-v error -select_streams a -show_entries stream=index -of csv=p=0 "${toWslPath(segFiles[0])}"`);
+    hasAudio = audioProbe.trim().length > 0;
+  } catch { hasAudio = false; }
+
   // Build inputs
   const inputs = segFiles.map(f => `-i "${toWslPath(f)}"`).join(" ");
 
-  // Build xfade filter chain
-  // xfade types: fade, wipeleft, dissolve, etc.
+  // Map transition type to xfade name
   const xfadeType = (type) => {
     switch (type) {
       case "dissolve": return "dissolve";
@@ -165,10 +176,12 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     }
   };
 
-  // Calculate segment durations for offset computation
+  // Calculate actual segment durations from extracted files (more reliable)
   const segDurations = segments.map(s => s.src_out - s.src_in);
 
-  // Build the filter chain progressively
+  // Build the xfade filter chain. Every transition uses xfade to keep
+  // a uniform filter graph (no mixing concat + xfade which is invalid).
+  // For "hard_cut" transitions, use a very short fade (0.001s) that is invisible.
   let filterParts = [];
   let audioParts = [];
   let lastVideoLabel = "[0:v]";
@@ -179,48 +192,50 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     const trans = transMap[segments[i].id];
     const tType = trans?.type || "hard_cut";
 
-    if (tType === "hard_cut") {
-      // For hard cuts in a mixed chain, use concat filter
-      const outLabel = `[v${i + 1}]`;
-      const aOutLabel = `[a${i + 1}]`;
-      filterParts.push(`${lastVideoLabel}[${i + 1}:v]concat=n=2:v=1:a=0${outLabel}`);
-      audioParts.push(`${lastAudioLabel}[${i + 1}:a]concat=n=2:v=0:a=1${aOutLabel}`);
-      lastVideoLabel = outLabel;
+    // Use real fade for soft transitions, negligible fade for hard cuts
+    const fadeDur = tType === "hard_cut" ? 0.001 : FADE_DURATION;
+    const offset = Math.max(0, cumulativeOffset - fadeDur);
+    const outLabel = `[v${i + 1}]`;
+    const aOutLabel = `[a${i + 1}]`;
+
+    filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
+    if (hasAudio) {
+      audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${fadeDur}${aOutLabel}`);
       lastAudioLabel = aOutLabel;
-    } else {
-      // Soft transition via xfade
-      const offset = Math.max(0, cumulativeOffset - FADE_DURATION);
-      const outLabel = `[v${i + 1}]`;
-      const aOutLabel = `[a${i + 1}]`;
-      filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${FADE_DURATION}:offset=${offset.toFixed(3)}${outLabel}`);
-      audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${FADE_DURATION}${aOutLabel}`);
-      lastVideoLabel = outLabel;
-      lastAudioLabel = aOutLabel;
-      cumulativeOffset -= FADE_DURATION; // xfade overlaps
     }
-    cumulativeOffset += segDurations[i + 1];
+    lastVideoLabel = outLabel;
+
+    // Track cumulative position: next segment starts at (offset + fadeDur) + next segment's duration
+    // but xfade overlaps by fadeDur, so net position = offset + segDurations[i+1]
+    cumulativeOffset = offset + segDurations[i + 1];
   }
 
-  if (filterParts.length > 0) {
-    const filterComplex = [...filterParts, ...audioParts].join(";");
-    console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} filters`);
-    try {
-      await ffmpeg(`-y ${inputs} -filter_complex "${filterComplex}" -map "${lastVideoLabel}" -map "${lastAudioLabel}" -c:v libx264 -crf 18 -preset medium -c:a aac -b:a 192k -movflags +faststart "${wslOut}"`);
-    } catch (filterErr) {
-      // If filter_complex fails (e.g., no audio streams), fall back to simple concat
-      console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
+  try {
+    if (filterParts.length > 0) {
+      const allFilters = hasAudio ? [...filterParts, ...audioParts] : filterParts;
+      const filterComplex = allFilters.join(";");
+      const mapArgs = hasAudio
+        ? `-map "${lastVideoLabel}" -map "${lastAudioLabel}"`
+        : `-map "${lastVideoLabel}"`;
+      const audioArgs = hasAudio ? "-c:a aac -b:a 192k" : "-an";
+      console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
+      try {
+        await ffmpeg(`-y ${inputs} -filter_complex "${filterComplex}" ${mapArgs} -c:v libx264 -crf 18 -preset medium ${audioArgs} -movflags +faststart "${wslOut}"`);
+      } catch (filterErr) {
+        // If filter_complex fails, fall back to simple concat
+        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
+        const concatFile = path.join(tmpDir, "concat.txt");
+        fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
+        await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+      }
+    } else {
       const concatFile = path.join(tmpDir, "concat.txt");
       fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
       await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
     }
-  } else {
-    // No transitions at all (shouldn't happen, but safety)
-    const concatFile = path.join(tmpDir, "concat.txt");
-    fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+  } finally {
+    for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
   }
-
-  for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
 }
 
 //  POST /api/analyze — multi-agent EditPlan (web client)
@@ -251,6 +266,7 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
   const name   = req.query.name || "highlight";
+  if (isNaN(inSec) || isNaN(outSec)) return res.status(400).json({ error: "in/out must be valid numbers" });
   if (outSec <= inSec) return res.status(400).json({ error: "out must be > in" });
   const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   try {
@@ -280,6 +296,11 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     // Probe video metadata
     const durationStr = await ffprobe(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
     const duration = parseFloat(durationStr);
+    if (isNaN(duration) || duration <= 0) {
+      cleanup(tmpIn, tmpOut);
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+      return res.status(400).json({ error: "Could not determine video duration" });
+    }
     const videoMeta = await probeVideoMeta(wslIn, duration);
     console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
 

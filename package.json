@@ -10,8 +10,8 @@
   "scripts": {
     "dev": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspace=apps/web",
-    "lint": "echo 'lint ok'",
-    "typecheck": "echo 'typecheck ok'"
+    "lint": "npm run lint --workspace=apps/web --if-present",
+    "typecheck": "npm run typecheck --workspace=apps/web --if-present"
   },
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",

@@ -56,7 +56,7 @@ You receive video metadata and sampled frames. You select the strongest segments
 
 RULES:
 - Select 2-6 segments that together cover 30%-60% of the original duration.
-- Total kept time MUST be less than ${(duration * 0.65).toFixed(1)} seconds.
+- Total kept time MUST be less than ${(duration * 0.75).toFixed(1)} seconds.
 - Each segment: {"id": "s1", "src_in": <seconds>, "src_out": <seconds>, "reason": "<why>"}
 - CUT OUT: dead air, filler, repetition, long pauses, boring parts, intros/outros if uninteresting.
 - KEEP: action, key points, emotional peaks, humor, strong visuals, story beats.
@@ -107,7 +107,7 @@ You receive segments chosen by the Cut Agent. Your job is to:
 - Split overly long segments (>30% of total duration) if the middle has a dead spot.
 - Ensure the final edit has a strong opening and a satisfying ending.
 
-Constraints: total kept duration must stay between 30%-65% of ${duration.toFixed(1)}s. Do NOT alter resolution (${width}x${height}).
+Constraints: total kept duration must stay between 30%-75% of ${duration.toFixed(1)}s. Do NOT alter resolution (${width}x${height}).
 
 Input segments: ${segmentsJSON}
 
@@ -221,13 +221,17 @@ function runConstraintsAgent(videoMeta, segments, transitions) {
     }
   }
 
+  // Map old IDs to positions BEFORE reassigning
+  const oldIdToIndex = {};
+  segments.forEach((s, i) => { oldIdToIndex[s.id] = i; });
+
   // Re-assign sequential IDs
   segments.forEach((s, i) => { s.id = `s${i + 1}`; });
 
-  // Rebuild transitions with corrected IDs
+  // Rebuild transitions using position-based matching (old IDs no longer exist)
   const fixedTransitions = [];
   for (let i = 0; i < segments.length - 1; i++) {
-    const existing = transitions.find(t => t.from === segments[i].id || (i < transitions.length && transitions[i]));
+    const existing = transitions.find(t => oldIdToIndex[t.from] === i);
     fixedTransitions.push({
       from: segments[i].id,
       to: segments[i + 1].id,
@@ -238,12 +242,12 @@ function runConstraintsAgent(videoMeta, segments, transitions) {
   // Validate total duration constraint (30-65% of original)
   const totalKept = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
   const ratio = totalKept / duration;
-  if (ratio > 0.90) {
-    issues.push(`Total kept ${(ratio * 100).toFixed(0)}% exceeds 90% — not a highlights edit`);
+  if (ratio > 0.75) {
+    issues.push(`Total kept ${(ratio * 100).toFixed(0)}% exceeds 75% — not a highlights edit`);
   }
 
   // Resolution/aspect constraint is always enforced at render level
-  const constraints_ok = issues.length === 0 || !issues.some(i => i.includes("not a highlights edit"));
+  const constraints_ok = issues.length === 0 || !issues.some(iss => iss.includes("not a highlights edit"));
 
   return {
     segments: segments.map(s => ({ id: s.id, src_in: s.src_in, src_out: s.src_out })),
@@ -338,7 +342,7 @@ async function runEditPipeline(videoMeta, frames = []) {
 
   // Check if AI returned near-full video (>90%) — override with fallback
   const totalKept = cutResult.segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
-  if (totalKept >= videoMeta.duration * 0.90) {
+  if (totalKept >= videoMeta.duration * 0.75) {
     log("CUT", `Segments cover ${(totalKept / videoMeta.duration * 100).toFixed(0)}% — too much, using fallback`);
     cutResult = buildFallbackCutResult(videoMeta.duration);
   }

@@ -2,12 +2,13 @@
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
-import { exportTrimmed, preloadFFmpeg } from "./export";
+import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
 // preload ffmpeg in background
 preloadFFmpeg().catch(console.error);
 
 interface Clip { id: string; name: string; url: string; duration: number; }
-interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; }
+interface EditPlan { segments: { id: string; src_in: number; src_out: number }[]; transitions?: { from: string; to: string; type: string }[]; render_constraints?: Record<string, unknown>; notes?: Record<string, unknown>; }
+interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; editPlan?: EditPlan; }
 const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [] };
 
 export default function App() {
@@ -55,43 +56,68 @@ export default function App() {
   const activeClip = state.clips[state.clips.length - 1];
   const duration = activeClip?.duration || 0;
 
+  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
+
   const handleAutoEdit = async () => {
     if (!videoRef.current || !activeClip) return;
+    if (agentLoading || exporting) return;
     setAgentLoading(true);
     setAgentSummary(null);
     setExportDone(false);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+
     try {
       const frames = await extractFrames(videoRef.current, 10);
-      const res = await fetch("http://localhost:3001/api/analyze", {
+      const width = videoRef.current.videoWidth || 0;
+      const height = videoRef.current.videoHeight || 0;
+      const res = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ duration, frames }),
+        body: JSON.stringify({ duration, frames, width, height, fps: 30 }),
+        signal: controller.signal,
       });
-      const data = await res.json();
+      clearTimeout(timeout);
 
-      let newInOut = state.inOut;
-      if (data?.editPlan?.timelineOps) {
-        for (const op of data.editPlan.timelineOps) {
-          if (op.op === "setInOut") {
-            newInOut = { in: op.in, out: op.out };
-            save({ ...state, inOut: newInOut });
-          }
-        }
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Server error ${res.status}: ${errText}`);
       }
 
-      setAgentSummary(data?.editPlan?.summary || "Done");
+      const data = await res.json();
 
-      // הורד אוטומטית
+      // Parse the new EditPlan schema (segments array + transitions)
+      const editPlan: EditPlan | undefined = data?.editPlan;
+      const segs = editPlan?.segments || data?.segments || [];
+
+      let newInOut = state.inOut;
+      if (segs.length > 0) {
+        // Use first/last segment bounds for the UI in/out display
+        newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
+      }
+      save({ ...state, inOut: newInOut, editPlan });
+
+      const summary = data?.summary || `${segs.length} highlights selected`;
+      setAgentSummary(summary);
+
+      // Export: use multi-segment auto-edit if we have an editPlan
       setExporting(true);
       setExportProgress(0);
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
-      await exportTrimmed(activeClip.url, newInOut.in, newInOut.out, `${name}_highlight.mp4`, setExportProgress);
+      if (editPlan && segs.length > 1) {
+        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, API_BASE);
+      } else {
+        await exportTrimmed(activeClip.url, newInOut.in, newInOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
+      }
       setExportDone(true);
       setExporting(false);
 
     } catch (err) {
+      clearTimeout(timeout);
+      const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
-      setAgentSummary("Error - check console");
+      setAgentSummary(`Error: ${msg}`);
       setExporting(false);
     }
     setAgentLoading(false);
