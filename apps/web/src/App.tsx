@@ -1,40 +1,35 @@
-﻿import { exportTrimmed } from "./export";
-import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
+import { extractFrames } from "./frameExtractor";
+import { exportTrimmed } from "./export";
 
 interface Clip { id: string; name: string; url: string; duration: number; }
 interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; }
-
 const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [] };
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [agentGoal, setAgentGoal] = useState("");
-  const [agentResponse, setAgentResponse] = useState<string | null>(null);
+  const [agentSummary, setAgentSummary] = useState<string | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportDone, setExportDone] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
   useEffect(() => {
     loadFromDB().then((s) => { if (s) setState(s as ProjectState); }).catch(console.error);
   }, []);
 
-  const save = (newState: ProjectState) => {
-    setState(newState);
-    saveToDB(newState).catch(console.error);
-  };
+  const save = (newState: ProjectState) => { setState(newState); saveToDB(newState).catch(console.error); };
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const url = URL.createObjectURL(file);
-    const clip: Clip = { id: Date.now().toString(), name: file.name, url, duration: 0 };
-    save({ ...state, clips: [...state.clips, clip] });
+    save({ ...state, clips: [...state.clips, { id: Date.now().toString(), name: file.name, url, duration: 0 }] });
   };
 
   const handleVideoLoad = () => {
@@ -49,48 +44,25 @@ export default function App() {
     setPlaying(!playing);
   };
 
-  const fmt = (t: number) => `${Math.floor(t/60).toString().padStart(2,"0")}:${Math.floor(t%60).toString().padStart(2,"0")}`;
+  const fmt = (t: number) => {
+    const m = Math.floor(t / 60).toString().padStart(2, "0");
+    const s = Math.floor(t % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
 
   const activeClip = state.clips[state.clips.length - 1];
   const duration = activeClip?.duration || 0;
 
-  const handleExport = async () => {
-    if (!activeClip) return;
-    setExporting(true);
-    setExportProgress(0);
-    try {
-      const originalName = activeClip.name.replace(/\.[^/.]+$/, "");
-      await exportTrimmed(
-        activeClip.url,
-        state.inOut.in,
-        state.inOut.out,
-        `${originalName}_edited.mp4`,
-        (p) => setExportProgress(p)
-      );
-      setExportProgress(100);
-      setTimeout(() => setExportProgress(0), 2000);
-    } catch (err) {
-      console.error(err);
-    }
-    setExporting(false);
-  };
-
-  const cancelExport = () => {
-    mediaRecorderRef.current?.stop();
-    videoRef.current?.pause();
-    setExporting(false);
-    setExportProgress(0);
-  };
-
-  const handleSuggest = async () => {
-    if (!agentGoal.trim()) return;
+  const handleAutoEdit = async () => {
+    if (!videoRef.current || !activeClip) return;
     setAgentLoading(true);
-    setAgentResponse(null);
+    setAgentSummary(null);
     try {
+      const frames = await extractFrames(videoRef.current, 10);
       const res = await fetch("http://localhost:3001/api/ai/suggest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: agentGoal, currentState: state }),
+        body: JSON.stringify({ duration, frames }),
       });
       const data = await res.json();
       if (data?.editPlan?.timelineOps) {
@@ -100,60 +72,88 @@ export default function App() {
           }
         }
       }
-      setAgentResponse(JSON.stringify(data, null, 2));
+      setAgentSummary(data?.editPlan?.summary || "Done");
     } catch {
-      setAgentResponse(" Could not reach agent API.\nMake sure apps/api is running on port 3001.");
+      setAgentSummary(" API not running. Start apps/api on port 3001.");
     }
     setAgentLoading(false);
   };
 
+  const handleExport = async () => {
+    if (!activeClip) return;
+    setExporting(true);
+    setExportDone(false);
+    setExportProgress(0);
+    try {
+      const name = activeClip.name.replace(/\.[^/.]+$/, "");
+      await exportTrimmed(activeClip.url, state.inOut.in, state.inOut.out, `${name}_edited.mp4`, setExportProgress);
+      setExportDone(true);
+    } catch (err) {
+      console.error(err);
+    }
+    setExporting(false);
+  };
+
   return (
     <div className="app">
-      {/* ASSETS */}
-      <div className="panel">
-        <div className="panel-header">Assets</div>
+
+      {/* SIDEBAR */}
+      <aside className="sidebar">
+        <div className="logo"> VideoAgent</div>
+
+        <div className="section-label">Assets</div>
         <label className="import-btn">
-          <span>＋</span> Import Video
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import Video
           <input type="file" accept="video/*" onChange={handleImport} style={{ display: "none" }} />
         </label>
+
         <div className="clip-list">
-          {state.clips.length === 0 && <div style={{ color: "#333", fontSize: 12 }}>No clips yet</div>}
-          {state.clips.map((c) => (
-            <div key={c.id} className="clip-item"> {c.name}</div>
-          ))}
+          {state.clips.length === 0
+            ? <div className="empty-clips">No clips yet</div>
+            : state.clips.map((c) => (
+              <div key={c.id} className={`clip-item ${c.id === activeClip?.id ? "active" : ""}`}>
+                <span className="clip-icon"></span>
+                <span className="clip-name">{c.name}</span>
+                <span className="clip-dur">{fmt(c.duration)}</span>
+              </div>
+            ))
+          }
         </div>
 
+        <div className="spacer" />
+
         {activeClip && (
-          <div className="export-section">
-            <div className="panel-header" style={{marginTop: 8}}>Export</div>
+          <div className="export-box">
+            <div className="section-label">Export</div>
+            <div className="export-info">
+              <span>{fmt(state.inOut.in)}  {fmt(state.inOut.out)}</span>
+              <span className="export-dur">{fmt(state.inOut.out - state.inOut.in)}</span>
+            </div>
             {exporting ? (
-              <>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${exportProgress}%` }} />
-                </div>
-                <div className="progress-label">{Math.round(exportProgress)}% exporting...</div>
-                <button className="cancel-btn" onClick={cancelExport}> Cancel</button>
-              </>
+              <div className="progress-wrap">
+                <div className="progress-bar"><div className="progress-fill" style={{ width: `${exportProgress}%` }} /></div>
+                <div className="progress-label">{exportProgress}%</div>
+              </div>
             ) : (
               <button className="export-btn" onClick={handleExport}>
-                 Export & Download
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                {exportDone ? " Downloaded!" : "Export & Download"}
               </button>
-            )}
-            {exportProgress === 100 && (
-              <div className="export-done"> Download started!</div>
             )}
           </div>
         )}
-      </div>
+      </aside>
 
       {/* MAIN */}
-      <div className="main-area">
-        <div className="preview-panel">
-          <div className="preview-top">
-            <div className="panel-header" style={{ borderBottom: "none", paddingBottom: 0 }}>Preview</div>
-            <div className="timecode">{fmt(currentTime)}</div>
+      <main className="main">
+        <div className="preview-area">
+          <div className="preview-header">
+            <span className="preview-title">Preview</span>
+            <span className="timecode">{fmt(currentTime)}</span>
           </div>
-          <div className="video-container">
+
+          <div className="video-wrap">
             {activeClip ? (
               <video
                 ref={videoRef}
@@ -161,64 +161,93 @@ export default function App() {
                 onLoadedMetadata={handleVideoLoad}
                 onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
                 onEnded={() => setPlaying(false)}
+                onClick={togglePlay}
               />
             ) : (
-              <div className="empty-preview">
-                <span></span>
-                Import a video to get started
+              <div className="empty-video">
+                <div className="empty-icon"></div>
+                <div className="empty-text">Import a video to get started</div>
               </div>
             )}
+            {activeClip && (
+              <button className="play-overlay" onClick={togglePlay}>
+                {playing ? "" : ""}
+              </button>
+            )}
           </div>
-          <div className="controls">
-            <button className="play-btn" onClick={togglePlay} disabled={!activeClip}>
-              {playing ? "" : ""}
-            </button>
-            <input type="range" min={0} max={duration} step={0.05} value={currentTime}
+
+          <div className="scrubber-row">
+            <input type="range" className="scrubber" min={0} max={duration} step={0.05} value={currentTime}
               onChange={e => { const t = parseFloat(e.target.value); if (videoRef.current) videoRef.current.currentTime = t; setCurrentTime(t); }} />
           </div>
         </div>
 
-        <div className="timeline-panel">
-          <div className="timeline-labels">
-            <span>In: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.in)}</strong></span>
-            <span>Duration: <strong style={{color:"#aaa"}}>{fmt(state.inOut.out - state.inOut.in)}</strong></span>
-            <span>Out: <strong style={{color:"#7c3aed"}}>{fmt(state.inOut.out)}</strong></span>
+        <div className="timeline-area">
+          <div className="timeline-header">
+            <span className="tl-label">In <strong>{fmt(state.inOut.in)}</strong></span>
+            <span className="tl-dur"> {fmt(state.inOut.out - state.inOut.in)} </span>
+            <span className="tl-label">Out <strong>{fmt(state.inOut.out)}</strong></span>
           </div>
           <div className="timeline-track">
-            <div className="timeline-range" style={{
-              left: duration ? `${(state.inOut.in/duration)*100}%` : "0%",
-              width: duration ? `${((state.inOut.out-state.inOut.in)/duration)*100}%` : "100%"
+            <div className="tl-bg" />
+            <div className="tl-range" style={{
+              left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
+              width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%"
             }} />
-            <div className="timeline-playhead" style={{ left: duration ? `${(currentTime/duration)*100}%` : "0%" }} />
+            <div className="tl-head" style={{ left: duration ? `${(currentTime / duration) * 100}%` : "0%" }} />
           </div>
-          <div className="inout-controls">
-            <label>In <span>{fmt(state.inOut.in)}</span>
+          <div className="inout-row">
+            <label>
+              <span>In</span>
               <input type="range" min={0} max={duration} step={0.05} value={state.inOut.in}
                 onChange={e => save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } })} />
             </label>
-            <label>Out <span>{fmt(state.inOut.out)}</span>
+            <label>
+              <span>Out</span>
               <input type="range" min={0} max={duration} step={0.05} value={state.inOut.out}
                 onChange={e => save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } })} />
             </label>
           </div>
         </div>
-      </div>
+      </main>
 
-      {/* AGENT */}
-      <div className="panel agent-panel">
-        <div className="panel-header"><span className="status-dot" />Agent</div>
-        <textarea
-          placeholder={"Describe your edit...\ne.g. trim to first 30 seconds"}
-          value={agentGoal}
-          onChange={e => setAgentGoal(e.target.value)}
-          rows={5}
-        />
-        <button className="suggest-btn" onClick={handleSuggest} disabled={agentLoading}>
-          {agentLoading ? " Thinking..." : " Suggest Edit"}
-        </button>
-        {agentResponse && <pre className="agent-response">{agentResponse}</pre>}
-      </div>
+      {/* AGENT PANEL */}
+      <aside className="agent-panel">
+        <div className="agent-header">
+          <span className="pulse" />
+          <span>AI Agent</span>
+          <span className="agent-model">qwen-vision</span>
+        </div>
+
+        <div className="agent-body">
+          <div className="agent-desc">
+            Qwen will analyze your video frames and automatically find the best highlight moment to keep.
+          </div>
+
+          <button
+            className={`auto-edit-btn ${agentLoading ? "loading" : ""}`}
+            onClick={handleAutoEdit}
+            disabled={agentLoading || !activeClip}
+          >
+            {agentLoading ? (
+              <><span className="spinner" /> Analyzing frames...</>
+            ) : (
+              <><span></span> Auto Edit with Vision</>
+            )}
+          </button>
+
+          {agentSummary && (
+            <div className="agent-result">
+              <div className="agent-result-label">AI Decision</div>
+              <div className="agent-result-text">{agentSummary}</div>
+              <div className="agent-result-range">
+                {fmt(state.inOut.in)}  {fmt(state.inOut.out)}
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
+
     </div>
   );
 }
-

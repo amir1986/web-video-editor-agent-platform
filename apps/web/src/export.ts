@@ -4,13 +4,13 @@ import { fetchFile, toBlobURL } from "@ffmpeg/util";
 let ffmpeg: FFmpeg | null = null;
 
 export async function loadFFmpeg(onProgress: (p: number) => void): Promise<FFmpeg> {
-  if (ffmpeg) return ffmpeg;
+  if (ffmpeg?.loaded) return ffmpeg;
   ffmpeg = new FFmpeg();
   ffmpeg.on("progress", ({ progress }) => onProgress(Math.round(progress * 100)));
-  const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+  const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
   await ffmpeg.load({
-    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
+    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
   });
   return ffmpeg;
 }
@@ -23,15 +23,12 @@ export async function exportTrimmed(
   onProgress: (p: number) => void
 ): Promise<void> {
   const ff = await loadFFmpeg(onProgress);
+  onProgress(5);
   await ff.writeFile("input.mp4", await fetchFile(videoUrl));
-  await ff.exec([
-    "-i", "input.mp4",
-    "-ss", String(inSec),
-    "-to", String(outSec),
-    "-c", "copy",
-    "output.mp4"
-  ]);
-  const data = await ff.readFile("output.mp4");
+  onProgress(20);
+  await ff.exec(["-i","input.mp4","-ss",String(inSec),"-to",String(outSec),"-c","copy","output.mp4"]);
+  onProgress(90);
+  const data = await ff.readFile("output.mp4") as Uint8Array;
   const blob = new Blob([data], { type: "video/mp4" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -41,4 +38,5 @@ export async function exportTrimmed(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  onProgress(100);
 }

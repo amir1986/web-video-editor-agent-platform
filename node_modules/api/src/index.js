@@ -3,24 +3,27 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
 
 app.post("/api/ai/suggest", async (req, res) => {
-  const { goal, currentState } = req.body;
+  const { duration, frames } = req.body;
 
-  const prompt = `You are a video editing assistant. The user wants to edit a video.
-Current state: ${JSON.stringify(currentState)}
-User goal: ${goal}
+  const content = [
+    {
+      type: "text",
+      text: `You are a video highlight editor. You receive ${frames?.length || 0} frames spread evenly across a ${parseFloat(duration).toFixed(1)}-second video.
 
-Return ONLY a valid JSON object with this exact structure, no markdown, no explanation:
-{
-  "editPlan": {
-    "timelineOps": [
-      { "op": "setInOut", "in": <number_seconds>, "out": <number_seconds> }
-    ],
-    "summary": "<brief description of what you did>"
-  }
-}`;
+Analyze the frames visually and find the single most exciting highlight moment (action, kill, goal, key event).
+Ignore menus, loading screens, idle moments.
+
+Respond ONLY with this exact JSON (no markdown, no extra text):
+{"editPlan":{"timelineOps":[{"op":"setInOut","in":<number>,"out":<number>}],"summary":"<one sentence describing what you found>"}}`
+    },
+    ...(frames || []).map(f => ({
+      type: "image_url",
+      image_url: { url: f }
+    }))
+  ];
 
   try {
     const response = await fetch("http://localhost:11434/v1/chat/completions", {
@@ -28,7 +31,7 @@ Return ONLY a valid JSON object with this exact structure, no markdown, no expla
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "qwen3-coder:30b",
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content }],
         temperature: 0,
         stream: false
       })
@@ -36,16 +39,12 @@ Return ONLY a valid JSON object with this exact structure, no markdown, no expla
 
     const data = await response.json();
     const text = data.choices?.[0]?.message?.content || "";
-
-    // extract JSON from response
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return res.status(422).json({ error: "No JSON in response", raw: text });
-
-    const parsed = JSON.parse(match[0]);
-    res.json(parsed);
+    if (!match) return res.status(422).json({ error: "No JSON", raw: text });
+    res.json(JSON.parse(match[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(3001, () => console.log("API running on http://localhost:3001"));
+app.listen(3001, () => console.log(" API on http://localhost:3001"));
