@@ -1,6 +1,6 @@
 ﻿const express = require("express");
 const cors = require("cors");
-const { execSync, exec } = require("child_process");
+const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -10,27 +10,45 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-//  UTILS 
+// Convert Windows path to WSL path
+function toWslPath(winPath) {
+  return winPath.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+}
+
 function tmpFile(ext) {
-  return path.join(os.tmpdir(), `videoagent_${crypto.randomBytes(6).toString("hex")}.${ext}`);
+  return path.join(os.tmpdir(), `va_${crypto.randomBytes(6).toString("hex")}.${ext}`);
 }
 
 function cleanup(...files) {
   for (const f of files) try { fs.unlinkSync(f); } catch {}
 }
 
+function ffmpeg(args) {
+  return new Promise((resolve, reject) => {
+    exec(`wsl -d Ubuntu-24.04 -- ffmpeg ${args}`, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout);
+    });
+  });
+}
+
+function ffprobe(args) {
+  return new Promise((resolve, reject) => {
+    exec(`wsl -d Ubuntu-24.04 -- ffprobe ${args}`, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
 //  POST /api/analyze 
-// Input: { videoPath, duration, frames[] }
-// Output: { editPlan: { timelineOps, summary } }
 app.post("/api/analyze", async (req, res) => {
   const { duration, frames } = req.body;
-
   const content = [
     {
       type: "text",
       text: `You are a video highlight editor. You receive ${frames?.length || 0} frames from a ${parseFloat(duration || 0).toFixed(1)}-second video.
-Analyze visually and find the single best highlight moment (action, kill, goal, key event).
-Ignore menus, loading screens, idle time.
+Find the single best highlight moment (action, kill, goal, key event). Ignore menus, loading, idle.
 Return ONLY valid JSON, no markdown:
 {"editPlan":{"timelineOps":[{"op":"setInOut","in":<number>,"out":<number>}],"summary":"<one sentence>"}}`
     },
@@ -41,17 +59,12 @@ Return ONLY valid JSON, no markdown:
     const response = await fetch("http://localhost:11434/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "qwen3-coder:30b",
-        messages: [{ role: "user", content }],
-        temperature: 0,
-        stream: false
-      })
+      body: JSON.stringify({ model: "qwen3-coder:30b", messages: [{ role: "user", content }], temperature: 0, stream: false })
     });
     const data = await response.json();
     const text = data.choices?.[0]?.message?.content || "";
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return res.status(422).json({ error: "No JSON in response", raw: text });
+    if (!match) return res.status(422).json({ error: "No JSON", raw: text });
     res.json(JSON.parse(match[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -59,8 +72,6 @@ Return ONLY valid JSON, no markdown:
 });
 
 //  POST /api/trim 
-// Input: multipart or raw video bytes + query ?in=X&out=Y
-// Output: trimmed mp4 file download
 app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
@@ -74,15 +85,13 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   try {
     fs.writeFileSync(tmpIn, req.body);
 
-    await new Promise((resolve, reject) => {
-      exec(
-        `ffmpeg -y -ss ${inSec} -i "${tmpIn}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${tmpOut}"`,
-        (err, stdout, stderr) => err ? reject(new Error(stderr)) : resolve()
-      );
-    });
+    const wslIn  = toWslPath(tmpIn);
+    const wslOut = toWslPath(tmpOut);
+
+    await ffmpeg(`-y -ss ${inSec} -i "${wslIn}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
 
     res.set("Content-Type", "video/mp4");
-    res.set("Content-Disposition", `attachment; filename="${name}_highlight.mp4"`);
+    res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
   } catch (err) {
     cleanup(tmpIn, tmpOut);
@@ -91,84 +100,60 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
 });
 
 //  POST /api/auto-edit 
-// Full pipeline: upload video -> analyze -> trim -> return file
-// Perfect for bots (Telegram, WhatsApp, etc.)
 app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
-  const name = req.query.name || "video";
+  const name   = req.query.name || "video";
   const tmpIn  = tmpFile("mp4");
   const tmpOut = tmpFile("mp4");
+  const framesDir = path.join(os.tmpdir(), `frames_${crypto.randomBytes(4).toString("hex")}`);
 
   try {
     fs.writeFileSync(tmpIn, req.body);
+    fs.mkdirSync(framesDir);
+
+    const wslIn     = toWslPath(tmpIn);
+    const wslFrames = toWslPath(framesDir);
+    const wslOut    = toWslPath(tmpOut);
 
     // Get duration
-    const durationRaw = execSync(
-      `ffprobe -v error -show_entries format=duration -of csv=p=0 "${tmpIn}"`
-    ).toString().trim();
-    const duration = parseFloat(durationRaw);
+    const durationStr = await ffprobe(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
+    const duration = parseFloat(durationStr);
 
-    // Extract frames
-    const framesDir = path.join(os.tmpdir(), `frames_${crypto.randomBytes(4).toString("hex")}`);
-    fs.mkdirSync(framesDir);
-    const frameCount = Math.min(8, Math.floor(duration));
+    // Extract 6 frames
+    const frameCount = 6;
     const interval = duration / frameCount;
-
-    execSync(
-      `ffmpeg -i "${tmpIn}" -vf "fps=1/${interval},scale=256:144" -frames:v ${frameCount} "${framesDir}/frame%03d.jpg"`
-    );
+    await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=256:144" -frames:v ${frameCount} "${wslFrames}/frame%03d.jpg"`);
 
     const frames = fs.readdirSync(framesDir)
-      .filter(f => f.endsWith(".jpg"))
-      .sort()
-      .map(f => {
-        const buf = fs.readFileSync(path.join(framesDir, f));
-        return `data:image/jpeg;base64,${buf.toString("base64")}`;
-      });
+      .filter(f => f.endsWith(".jpg")).sort()
+      .map(f => `data:image/jpeg;base64,${fs.readFileSync(path.join(framesDir, f)).toString("base64")}`);
 
     fs.rmSync(framesDir, { recursive: true });
 
-    // Analyze with AI
+    // AI analyze
     const content = [
-      {
-        type: "text",
-        text: `You are a video highlight editor. You receive ${frames.length} frames from a ${duration.toFixed(1)}-second video.
-Find the single best highlight moment. Ignore menus, loading, idle.
-Return ONLY valid JSON:
-{"editPlan":{"timelineOps":[{"op":"setInOut","in":<number>,"out":<number>}],"summary":"<one sentence>"}}`
-      },
+      { type: "text", text: `You are a video highlight editor. ${frames.length} frames from ${duration.toFixed(1)}s video. Find best highlight. Return ONLY JSON: {"editPlan":{"timelineOps":[{"op":"setInOut","in":<n>,"out":<n>}],"summary":"<text>"}}` },
       ...frames.map(f => ({ type: "image_url", image_url: { url: f } }))
     ];
 
     const aiRes = await fetch("http://localhost:11434/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "qwen3-coder:30b",
-        messages: [{ role: "user", content }],
-        temperature: 0,
-        stream: false
-      })
+      body: JSON.stringify({ model: "qwen3-coder:30b", messages: [{ role: "user", content }], temperature: 0, stream: false })
     });
 
     const aiData = await aiRes.json();
     const text = aiData.choices?.[0]?.message?.content || "";
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return res.status(422).json({ error: "AI returned no JSON", raw: text });
+    if (!match) return res.status(422).json({ error: "AI no JSON", raw: text });
 
     const plan = JSON.parse(match[0]);
     const op = plan?.editPlan?.timelineOps?.find(o => o.op === "setInOut");
-    if (!op) return res.status(422).json({ error: "No setInOut op", plan });
+    if (!op) return res.status(422).json({ error: "No setInOut", plan });
 
     const inSec  = Math.max(0, op.in);
     const outSec = Math.min(duration, op.out);
 
-    // Trim
-    await new Promise((resolve, reject) => {
-      exec(
-        `ffmpeg -y -ss ${inSec} -i "${tmpIn}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${tmpOut}"`,
-        (err, stdout, stderr) => err ? reject(new Error(stderr)) : resolve()
-      );
-    });
+    await ffmpeg(`-y -ss ${inSec} -i "${wslIn}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
 
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}_highlight.mp4"`);
@@ -178,6 +163,7 @@ Return ONLY valid JSON:
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
 
   } catch (err) {
+    try { fs.rmSync(framesDir, { recursive: true }); } catch {}
     cleanup(tmpIn, tmpOut);
     res.status(500).json({ error: err.message });
   }
@@ -190,8 +176,7 @@ app.get("/api/health", (req, res) => {
 
 app.listen(3001, () => {
   console.log("VideoAgent API on http://localhost:3001");
-  console.log("Endpoints:");
-  console.log("  POST /api/analyze    - AI frame analysis");
-  console.log("  POST /api/trim       - Trim video");
-  console.log("  POST /api/auto-edit  - Full pipeline (for bots)");
+  console.log("  POST /api/analyze   - AI frame analysis");
+  console.log("  POST /api/trim      - Trim video (via WSL ffmpeg)");
+  console.log("  POST /api/auto-edit - Full pipeline for bots");
 });
