@@ -64,7 +64,7 @@ export default function App() {
     setExportDone(false);
     try {
       const frames = await extractFrames(videoRef.current, 10);
-      const res = await fetch("http://localhost:3001/api/ai/suggest", {
+      const res = await fetch("http://localhost:3001/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ duration, frames }),
@@ -248,5 +248,6 @@ export default function App() {
     </div>
   );
 }
+
 
 
