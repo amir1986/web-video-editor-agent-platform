@@ -2,11 +2,9 @@
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
-// preload ffmpeg in background
-preloadFFmpeg().catch(console.error);
-// preload ffmpeg in background
-preloadFFmpeg().catch(console.error);
 import { exportTrimmed, preloadFFmpeg } from "./export";
+// preload ffmpeg in background
+preloadFFmpeg().catch(console.error);
 
 interface Clip { id: string; name: string; url: string; duration: number; }
 interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; }

@@ -11,7 +11,11 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
 function toWslPath(p) {
-  return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+  // On Linux, paths don't need conversion
+  if (process.platform === "win32") {
+    return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+  }
+  return p;
 }
 function tmpFile(ext) {
   return path.join(os.tmpdir(), `va_${crypto.randomBytes(6).toString("hex")}.${ext}`);
@@ -19,9 +23,22 @@ function tmpFile(ext) {
 function cleanup(...files) {
   for (const f of files) try { fs.unlinkSync(f); } catch {}
 }
+function ffmpegCmd(args) {
+  // On Windows use WSL, on Linux/Mac call ffmpeg directly
+  if (process.platform === "win32") {
+    return `wsl -d Ubuntu-24.04 -- ffmpeg ${args}`;
+  }
+  return `ffmpeg ${args}`;
+}
+function ffprobeCmd(args) {
+  if (process.platform === "win32") {
+    return `wsl -d Ubuntu-24.04 -- ffprobe ${args}`;
+  }
+  return `ffprobe ${args}`;
+}
 function ffmpeg(args) {
   return new Promise((resolve, reject) => {
-    exec(`wsl -d Ubuntu-24.04 -- ffmpeg ${args}`, { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
+    exec(ffmpegCmd(args), { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve();
     });
@@ -29,7 +46,7 @@ function ffmpeg(args) {
 }
 function ffprobe(args) {
   return new Promise((resolve, reject) => {
-    exec(`wsl -d Ubuntu-24.04 -- ffprobe ${args}`, (err, stdout, stderr) => {
+    exec(ffprobeCmd(args), (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
