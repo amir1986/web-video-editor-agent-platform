@@ -1,5 +1,5 @@
 ﻿import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
+import { fetchFile } from "@ffmpeg/util";
 
 let ffmpeg: FFmpeg | null = null;
 let loadPromise: Promise<void> | null = null;
@@ -9,8 +9,8 @@ export function preloadFFmpeg(): Promise<void> {
   loadPromise = (async () => {
     ffmpeg = new FFmpeg();
     await ffmpeg.load({
-      coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
-      wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
+      coreURL: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js",
+      wasmURL: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm",
     });
   })();
   return loadPromise;
