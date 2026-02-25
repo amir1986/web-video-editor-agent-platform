@@ -147,7 +147,8 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   try {
     fs.writeFileSync(tmpIn, req.body);
-    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
+    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s`);
+    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c:v libx264 -c:a aac -preset ultrafast -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
