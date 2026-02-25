@@ -70,43 +70,66 @@ async function extractFrames(wslIn, duration, count) {
 
 async function analyzeWithAI(frames, duration) {
   const timestamps = frames.map(f => `${f.timestamp}s`).join(", ");
-  const content = [
-    {
-      type: "text",
-      text: `You are a professional video editor. You see ${frames.length} frames from a ${duration.toFixed(1)}-second video at timestamps: ${timestamps}
 
-Analyze freely what you see and decide what to keep. No rules, no constraints, no time limits.
-Use pure judgment - keep exciting moments, cut boring parts. You decide everything.
+  // Try vision-capable request first, fall back to text-only if model doesn't support images
+  const textPrompt = `You are a professional video editor. You have a ${duration.toFixed(1)}-second video with frames at timestamps: ${timestamps}.
 
-Return ONLY valid JSON:
+Create an edit plan: keep the most interesting parts, cut boring/repetitive sections.
+As a rule of thumb: keep roughly the best 60% of the video.
+
+Return ONLY valid JSON (no extra text):
 {
   "segments": [
     { "in": <seconds>, "out": <seconds>, "reason": "<why keep this>" }
   ],
-  "summary": "<describe the edit>"
-}`
-    },
+  "summary": "<one sentence describing the edit>"
+}`;
+
+  const contentWithImages = [
+    { type: "text", text: textPrompt },
     ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))
   ];
 
-  const res = await fetch("http://localhost:11434/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "qwen3-coder:30b", messages: [{ role: "user", content }], temperature: 0, stream: false })
-  });
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || "";
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("AI no JSON: " + text.slice(0, 300));
-  return JSON.parse(match[0]);
+  const tryRequest = async (content) => {
+    const res = await fetch("http://localhost:11434/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "qwen3-coder:30b", messages: [{ role: "user", content }], temperature: 0, stream: false })
+    });
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || "";
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("AI no JSON: " + text.slice(0, 300));
+    const parsed = JSON.parse(match[0]);
+    // If AI says it can't see images, throw so we retry text-only
+    if (!parsed.segments?.length && text.toLowerCase().includes("missing visual")) {
+      throw new Error("vision_not_supported");
+    }
+    return parsed;
+  };
+
+  try {
+    return await tryRequest(contentWithImages);
+  } catch (err) {
+    if (err.message === "vision_not_supported" || err.message.includes("missing visual")) {
+      console.log("Vision not supported, retrying text-only...");
+      return await tryRequest(textPrompt);
+    }
+    throw err;
+  }
 }
 
 async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
+  // If single full-video segment, copy without re-encoding to preserve quality
+  if (segments.length === 1 && segments[0].in === 0) {
+    await ffmpeg(`-y -i "${wslIn}" -c copy "${wslOut}"`);
+    return;
+  }
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c:v libx264 -c:a aac -preset ultrafast -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c:v libx264 -c:a aac -preset slow -crf 18 -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
   const concatFile = path.join(tmpDir, "concat.txt");
