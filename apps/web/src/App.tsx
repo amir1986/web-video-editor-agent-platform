@@ -78,7 +78,6 @@ export default function App() {
         body: JSON.stringify({ duration, frames, width, height, fps: 30 }),
         signal: controller.signal,
       });
-      clearTimeout(timeout);
 
       if (!res.ok) {
         const errText = await res.text();
@@ -114,11 +113,12 @@ export default function App() {
       setExporting(false);
 
     } catch (err) {
-      clearTimeout(timeout);
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
       setAgentSummary(`Error: ${msg}`);
       setExporting(false);
+    } finally {
+      clearTimeout(timeout);
     }
     setAgentLoading(false);
   };
