@@ -58,6 +58,7 @@ function ffprobeExec(args) {
 /**
  * Compress video to fit within maxBytes using ffmpeg.
  * Only used for Telegram's 50MB upload limit - other platforms are not limited.
+ * Preserves: original resolution, aspect ratio, rotation, frame rate.
  */
 async function compressForTelegram(inputPath, outputPath, maxBytes) {
   const wslIn = toWslPath(inputPath);
@@ -83,7 +84,11 @@ async function compressForTelegram(inputPath, outputPath, maxBytes) {
   const bufsize = Math.floor((videoBitrate * 2) / 1000) + "k";
   console.log(`[COMPRESS] duration=${duration.toFixed(1)}s, target=${(targetBytes / 1024 / 1024).toFixed(1)}MB, vbr=${vbr}`);
 
-  await ffmpegExec(`-y -i "${wslIn}" -c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 128k -preset medium "${wslOut}"`);
+  // -map_metadata 0: preserve all metadata (rotation, etc.)
+  // -movflags +faststart: optimize for streaming
+  // No scale filter: preserves original resolution and aspect ratio exactly
+  const encArgs = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 128k -preset medium -map_metadata 0 -movflags +faststart`;
+  await ffmpegExec(`-y -i "${wslIn}" ${encArgs} "${wslOut}"`);
 
   // Check if output fits; if still too large, retry with proportionally lower bitrate
   const outSize = fs.statSync(outputPath).size;
@@ -94,7 +99,8 @@ async function compressForTelegram(inputPath, outputPath, maxBytes) {
     const adjustedVbr = Math.floor((videoBitrate * ratio) / 1000) + "k";
     const adjustedBuf = Math.floor((videoBitrate * ratio * 2) / 1000) + "k";
     console.log(`[COMPRESS] Still too large, retrying with vbr=${adjustedVbr}`);
-    await ffmpegExec(`-y -i "${wslIn}" -c:v libx264 -b:v ${adjustedVbr} -maxrate ${adjustedVbr} -bufsize ${adjustedBuf} -c:a aac -b:a 128k -preset medium "${wslOut}"`);
+    const retryArgs = `-c:v libx264 -b:v ${adjustedVbr} -maxrate ${adjustedVbr} -bufsize ${adjustedBuf} -c:a aac -b:a 128k -preset medium -map_metadata 0 -movflags +faststart`;
+    await ffmpegExec(`-y -i "${wslIn}" ${retryArgs} "${wslOut}"`);
     const finalSize = fs.statSync(outputPath).size;
     console.log(`[COMPRESS] Second pass output: ${(finalSize / 1024 / 1024).toFixed(1)}MB`);
   }

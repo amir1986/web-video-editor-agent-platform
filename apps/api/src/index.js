@@ -57,7 +57,8 @@ async function extractFrames(wslIn, duration, count) {
   const framesDir = path.join(os.tmpdir(), `frames_${crypto.randomBytes(4).toString("hex")}`);
   fs.mkdirSync(framesDir);
   const interval = duration / count;
-  await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=320:180" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
+  // scale=320:-2 preserves original aspect ratio (height auto-calculated, divisible by 2)
+  await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
   const frames = fs.readdirSync(framesDir)
     .filter(f => f.endsWith(".jpg")).sort()
     .map((f, i) => ({
@@ -181,60 +182,22 @@ Now analyze this ${duration.toFixed(1)}-second video and return ONLY valid JSON 
   }
 }
 
-/**
- * Probe the input video to get its encoding parameters (bitrate, codec, resolution).
- * Used to re-encode segments at the same quality as the original.
- */
-async function probeVideoParams(wslIn) {
-  try {
-    const json = await ffprobe(`-v error -select_streams v:0 -show_entries stream=codec_name,bit_rate,width,height -show_entries format=bit_rate -of json "${wslIn}"`);
-    const data = JSON.parse(json);
-    const stream = data.streams?.[0] || {};
-    const format = data.format || {};
-    // Use stream bitrate if available, else format bitrate, else default to high quality
-    const bitrate = parseInt(stream.bit_rate) || parseInt(format.bit_rate) || 0;
-    return {
-      codec: stream.codec_name || "h264",
-      bitrate, // bits per second, 0 means unknown
-      width: stream.width || 0,
-      height: stream.height || 0,
-    };
-  } catch (err) {
-    console.log("[PROBE] Could not probe video params:", err.message);
-    return { codec: "h264", bitrate: 0, width: 0, height: 0 };
-  }
-}
-
 async function stitchSegments(wslIn, segments, wslOut, tmpDir) {
-  // If single full-video segment starting at 0, copy without re-encoding
+  // Single full-video segment: straight copy
   if (segments.length === 1 && segments[0].in === 0) {
     await ffmpeg(`-y -i "${wslIn}" -c copy "${wslOut}"`);
     return;
   }
 
-  // Probe original quality to preserve it
-  const params = await probeVideoParams(wslIn);
-  console.log(`[STITCH] Original video: codec=${params.codec}, bitrate=${params.bitrate}, ${params.width}x${params.height}`);
-
-  // Build encoding args that match or exceed original quality
-  let encArgs;
-  if (params.bitrate > 0) {
-    // Re-encode at the original bitrate (no quality loss relative to source)
-    const vbr = Math.ceil(params.bitrate / 1000) + "k";
-    const bufsize = Math.ceil(params.bitrate * 2 / 1000) + "k";
-    encArgs = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 192k -preset slow`;
-    console.log(`[STITCH] Encoding at original bitrate: ${vbr}`);
-  } else {
-    // Bitrate unknown: use CRF 17 (visually lossless) to ensure no quality loss
-    encArgs = `-c:v libx264 -crf 17 -preset slow -c:a aac -b:a 192k`;
-    console.log(`[STITCH] Bitrate unknown, using CRF 17 (visually lossless)`);
-  }
-
+  // Use stream copy (-c copy) for each segment: zero quality loss, preserves
+  // resolution, rotation metadata, aspect ratio, frame rate — everything.
+  // Trade-off: cuts snap to the nearest keyframe (±0.5s), acceptable for highlights.
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} ${encArgs} -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    console.log(`[STITCH] Segment ${i}: ${seg.in}s → ${seg.out}s (stream copy)`);
+    await ffmpeg(`-y -ss ${seg.in} -i "${wslIn}" -t ${seg.out - seg.in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
   const concatFile = path.join(tmpDir, "concat.txt");
@@ -276,17 +239,8 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   try {
     fs.writeFileSync(tmpIn, req.body);
     console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s`);
-    // Probe original bitrate to preserve quality
-    const params = await probeVideoParams(toWslPath(tmpIn));
-    let trimEnc;
-    if (params.bitrate > 0) {
-      const vbr = Math.ceil(params.bitrate / 1000) + "k";
-      const bufsize = Math.ceil(params.bitrate * 2 / 1000) + "k";
-      trimEnc = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 192k -preset medium`;
-    } else {
-      trimEnc = `-c:v libx264 -crf 17 -preset medium -c:a aac -b:a 192k`;
-    }
-    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} ${trimEnc} -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
+    // Stream copy: no re-encoding, preserves original quality/resolution/rotation/aspect ratio
+    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
