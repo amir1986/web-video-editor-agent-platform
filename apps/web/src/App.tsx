@@ -30,6 +30,7 @@ interface ProjectState {
   volume?: number;
   savedAgentSummary?: string | null;
   savedActiveTab?: Tab;
+  wasAnalyzing?: boolean;
 }
 const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [], overlays: [], volume: 100 };
 
@@ -59,6 +60,7 @@ export default function App() {
   const [agentElapsed, setAgentElapsed] = useState(0);
   const [agentCurrentStep, setAgentCurrentStep] = useState<string | null>(null);
   const [dragClipIdx, setDragClipIdx] = useState<number | null>(null);
+  const [sessionResumeNeeded, setSessionResumeNeeded] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressEndRef = useRef<HTMLDivElement>(null);
@@ -118,7 +120,16 @@ export default function App() {
       if (restored.savedActiveTab) setActiveTab(restored.savedActiveTab);
 
       if (restoredClips.length > 0) {
-        setToast("Session restored");
+        if (restored.wasAnalyzing) {
+          // Analysis was interrupted by refresh
+          setSessionResumeNeeded(true);
+          setActiveTab("ai");
+          setToast("Session restored — AI analysis was interrupted");
+        } else if (restored.editPlan && restored.editPlan.segments.length > 0) {
+          setToast(`Session restored — ${restored.editPlan.segments.length} segments recovered`);
+        } else {
+          setToast("Session restored");
+        }
       }
     }).catch(console.error);
   }, []);
@@ -281,7 +292,15 @@ export default function App() {
     setExportDone(false);
     setAgentStartTime(Date.now());
     setAgentCurrentStep(null);
+    setSessionResumeNeeded(false);
     stepTimestampsRef.current = {};
+
+    // Mark that analysis is in progress (for refresh recovery)
+    setState(prev => {
+      const next = { ...prev, wasAnalyzing: true };
+      saveToDB(next).catch(console.error);
+      return next;
+    });
 
     const controller = new AbortController();
     const IDLE_MS = 60_000;
@@ -370,6 +389,12 @@ export default function App() {
       clearTimeout(timeout);
       setAgentStartTime(null);
       setAgentCurrentStep(null);
+      // Clear wasAnalyzing flag
+      setState(prev => {
+        const next = { ...prev, wasAnalyzing: false };
+        saveToDB(next).catch(console.error);
+        return next;
+      });
     }
     setAgentLoading(false);
   };
@@ -655,9 +680,18 @@ export default function App() {
         <div className="agent-body">
           {activeTab === "ai" && (
             <>
-              <div className="agent-desc">
-                AI agents analyze your video and automatically select the best highlights.
-              </div>
+              {!sessionResumeNeeded && (
+                <div className="agent-desc">
+                  AI agents analyze your video and automatically select the best highlights.
+                </div>
+              )}
+
+              {sessionResumeNeeded && activeClip && !agentLoading && (
+                <div className="agent-result" style={{ borderColor: "var(--orange)" }}>
+                  <div className="agent-result-label" style={{ color: "var(--orange)" }}>Analysis Interrupted</div>
+                  <div className="agent-result-text">Your AI analysis was interrupted by a page refresh. Would you like to restart it?</div>
+                </div>
+              )}
 
               <button
                 className={`auto-edit-btn ${agentLoading || exporting ? "loading" : ""}`}
@@ -668,6 +702,8 @@ export default function App() {
                   <><span className="spinner" /> Analyzing...</>
                 ) : exporting ? (
                   <><span className="spinner" /> Exporting {exportProgress}%...</>
+                ) : sessionResumeNeeded ? (
+                  "Restart AI Analysis"
                 ) : (
                   "Auto Edit with AI"
                 )}

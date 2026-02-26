@@ -916,7 +916,7 @@ app.post("/api/adjust-audio", authMiddleware, express.raw({ type: "*/*", limit: 
 
 // POST /api/merge — Concatenate multiple video files in order
 const multer = require("multer");
-const mergeUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 200 * 1024 * 1024 } });
+const mergeUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
 
 app.post("/api/merge", authMiddleware, mergeUpload.array("videos", 20), async (req, res) => {
   const files = req.files || [];
