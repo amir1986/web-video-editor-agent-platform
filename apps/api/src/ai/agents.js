@@ -346,8 +346,6 @@ function runQualityGuardAgent(videoMeta, editPlan) {
     preset: "medium",       // Good quality/speed tradeoff; never "ultrafast" or "veryfast"
     max_bitrate: null,      // No artificial cap
     pixel_format: "yuv420p",
-    // SAR/DAR enforcement
-    sar: "1:1",             // Square pixels (standard for most content)
     // Frame rate from source
     fps: fps || 30,
     fps_mode: "cfr",        // Constant frame rate to avoid stutter
@@ -392,7 +390,6 @@ function runQualityGuardAgent(videoMeta, editPlan) {
     crf: qualitySettings.crf,
     preset: qualitySettings.preset,
     pixel_format: qualitySettings.pixel_format,
-    sar: qualitySettings.sar,
     fps: fps,
     fps_mode: qualitySettings.fps_mode,
   };

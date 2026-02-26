@@ -159,7 +159,6 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   const qCrf = String(rc.crf || 18);
   const qPreset = rc.preset || "medium";
   const qPixFmt = rc.pixel_format || "yuv420p";
-  const qSar = rc.sar || "1:1";
   const qFpsMode = rc.fps_mode || "cfr";
 
   // Check if source codec allows stream copy
@@ -277,14 +276,12 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
       const filterComplex = allFilters.join(";");
       const audioArgs = hasAudio ? ["-c:a", "aac", "-b:a", "192k"] : ["-an"];
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
-      console.log(`[RENDER] Quality settings: ${qCodec} crf=${qCrf} preset=${qPreset} pix_fmt=${qPixFmt} sar=${qSar}`);
+      console.log(`[RENDER] Quality settings: ${qCodec} crf=${qCrf} preset=${qPreset} pix_fmt=${qPixFmt}`);
       try {
-        const sarFilter = `${lastVideoLabel}setsar=${qSar}[vout]`;
-        const fullFilterComplex = `${filterComplex};${sarFilter}`;
         const finalMapArgs = hasAudio
-          ? ["-map", "[vout]", "-map", lastAudioLabel]
-          : ["-map", "[vout]"];
-        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", fullFilterComplex, ...finalMapArgs, "-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
+          ? ["-map", lastVideoLabel, "-map", lastAudioLabel]
+          : ["-map", lastVideoLabel];
+        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", filterComplex, ...finalMapArgs, "-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
       } catch (filterErr) {
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
