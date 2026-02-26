@@ -115,7 +115,7 @@ export default function App() {
       setExportProgress(0);
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
       if (editPlan && segs.length > 1) {
-        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, API_BASE);
+        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
       } else {
         await exportTrimmed(activeClip.url, newInOut.in, newInOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
       }

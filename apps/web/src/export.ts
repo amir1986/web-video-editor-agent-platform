@@ -38,6 +38,7 @@ export async function exportWithEditPlan(
   videoUrl: string,
   filename: string,
   onProgress: (p: number) => void,
+  editPlan: Record<string, unknown>,
   apiBase: string = DEFAULT_API
 ): Promise<void> {
   onProgress(10);
@@ -45,9 +46,18 @@ export async function exportWithEditPlan(
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
+  // Send to /api/render with the EditPlan in a header — skips the AI pipeline
+  // entirely and only does the ffmpeg rendering step.
   const res = await fetch(
-    `${apiBase}/api/auto-edit?name=${name}`,
-    { method: "POST", body: videoBlob, headers: { "Content-Type": "video/mp4" } }
+    `${apiBase}/api/render?name=${name}`,
+    {
+      method: "POST",
+      body: videoBlob,
+      headers: {
+        "Content-Type": "video/mp4",
+        "X-Edit-Plan": JSON.stringify(editPlan),
+      },
+    }
   );
 
   onProgress(80);

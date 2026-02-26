@@ -222,7 +222,7 @@ function buildSourceMatchEncodingArgs(sourceQuality, rc) {
   } else {
     vArgs.push("-crf", String(rc?.crf || 18));
   }
-  vArgs.push("-preset", rc?.preset || "medium");
+  vArgs.push("-preset", rc?.preset || "fast");
   vArgs.push("-pix_fmt", rc?.pixel_format || "yuv420p");
 
   // Preserve resolution explicitly
@@ -560,11 +560,68 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
   }
 });
 
+//  POST /api/render — render a pre-built EditPlan (no AI pipeline)
+//  The web client already has the EditPlan from /api/analyze, so this
+//  endpoint skips AI entirely and only does the ffmpeg rendering step.
+app.post("/api/render", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
+  const name = req.query.name || "video";
+
+  // EditPlan is passed as a header to avoid multipart complexity
+  const editPlanHeader = req.headers["x-edit-plan"];
+  if (!editPlanHeader) return res.status(400).json({ error: "Missing X-Edit-Plan header" });
+  let editPlan;
+  try {
+    editPlan = JSON.parse(editPlanHeader);
+  } catch {
+    return res.status(400).json({ error: "Invalid X-Edit-Plan JSON" });
+  }
+  const segments = editPlan.segments || [];
+  if (!segments.length) return res.status(400).json({ error: "EditPlan has no segments" });
+
+  const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
+  const tmpDir = path.join(os.tmpdir(), `render_${crypto.randomBytes(4).toString("hex")}`);
+  fs.mkdirSync(tmpDir);
+  try {
+    fs.writeFileSync(tmpIn, req.body);
+    const inputSize = fs.statSync(tmpIn).size;
+    console.log(`[RENDER-API] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
+    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+
+    // Probe source quality for source-matched encoding
+    const sourceQuality = await probeSourceQuality(wslIn);
+
+    const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+    console.log(`[RENDER-API] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s`);
+
+    // Render the EditPlan directly — no AI pipeline
+    const renderStart = Date.now();
+    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+    const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
+    const outputSize = fs.statSync(tmpOut).size;
+    console.log(`[RENDER-API] Render done in ${renderElapsed}s`);
+    console.log(`[RENDER-API] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB)`);
+
+    const summary = `${segments.length} highlights rendered`;
+    res.set("Content-Type", "video/mp4");
+    res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
+    res.set("X-AI-Summary", summary);
+    res.set("X-Segments-Count", String(segments.length));
+    res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
+  } catch (err) {
+    cleanup(tmpIn, tmpOut);
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    console.error("[RENDER-API ERROR]", err);
+    res.status(500).json({ error: "Render failed" });
+  }
+});
+
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
 app.listen(3001, () => {
   console.log("VideoAgent API on http://localhost:3001");
   console.log("  POST /api/analyze   - AI analysis (web client)");
+  console.log("  POST /api/render    - Render pre-built EditPlan (web client)");
   console.log("  POST /api/trim      - Single segment trim");
   console.log("  POST /api/auto-edit - Full highlight reel (bots)");
 });
