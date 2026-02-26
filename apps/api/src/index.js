@@ -438,9 +438,29 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
 }
 
 //  POST /api/analyze — multi-agent EditPlan (web client)
+//  Streams NDJSON progress events automatically, final line is the result.
+//  Client receives lines like: {"type":"progress","agent":"CUT","message":"..."}
+//  Last line:                   {"type":"result","editPlan":{...},"summary":"..."}
 app.post("/api/analyze", async (req, res) => {
   const { duration, frames, width, height, fps } = req.body;
+
+  // Stream NDJSON progress to the client in real-time
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Transfer-Encoding", "chunked");
+
+  const sendLine = (obj) => {
+    try { res.write(JSON.stringify(obj) + "\n"); } catch {}
+  };
+
+  // Wire pipeline progress directly into the response stream
+  setProgressCallback((agent, message) => {
+    sendLine({ type: "progress", agent, message, ts: Date.now() });
+  });
+
   try {
+    sendLine({ type: "progress", agent: "SYSTEM", message: "Starting analysis...", ts: Date.now() });
+
     const frameData = (frames || []).map((f, i) => ({
       timestamp: Math.round((duration / frames.length) * i * 10) / 10,
       base64: f
@@ -448,16 +468,20 @@ app.post("/api/analyze", async (req, res) => {
     const videoMeta = { duration, fps: fps || 30, width: width || 0, height: height || 0 };
     const editPlan = await runEditPipeline(videoMeta, frameData);
 
-    // Backward-compatible response: include editPlan + legacy fields
-    const firstSeg = editPlan.segments?.[0];
-    res.json({
+    // Final result line
+    sendLine({
+      type: "result",
       editPlan,
       segments: editPlan.segments,
       summary: `${editPlan.segments.length} highlights selected`,
     });
+    res.end();
   } catch (err) {
     console.error("[ANALYZE ERROR]", err);
-    res.status(500).json({ error: "Analysis failed" });
+    sendLine({ type: "error", error: "Analysis failed", message: err.message });
+    res.end();
+  } finally {
+    setProgressCallback(null);
   }
 });
 
@@ -724,7 +748,7 @@ app.post("/api/auto-edit-stream", express.raw({ type: "*/*", limit: "2gb" }), as
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
 app.listen(3001, () => {
-  const provider = process.env.ANTHROPIC_API_KEY && process.env.LLM_PROVIDER === "claude" ? "Claude API" : "Ollama (local)";
+  const provider = process.env.ANTHROPIC_API_KEY ? "Claude API (auto-detected)" : "Ollama (local)";
   console.log("VideoAgent API on http://localhost:3001");
   console.log(`  LLM Provider: ${provider}`);
   console.log("  POST /api/analyze          - AI analysis (web client)");

@@ -20,7 +20,7 @@
  * - SSE progress events for real-time pipeline updates
  */
 
-const { llmRequest, claudeAgentLoop, ANTHROPIC_API_KEY, LLM_PROVIDER } = require("./llm-client");
+const { llmRequest, claudeAgentLoop, ANTHROPIC_API_KEY } = require("./llm-client");
 const { TOOL_DEFINITIONS, TOOL_HANDLERS, setToolContext } = require("./tools");
 const { getEditingContext } = require("./knowledge-base");
 
@@ -79,9 +79,8 @@ Return ONLY valid JSON:
 
 Analyze the video and decide which parts to keep for the highlight reel.`;
 
-  // Claude API with tool use: agent can call tools to gather more info
-  const useClaude = ANTHROPIC_API_KEY && LLM_PROVIDER === "claude";
-  if (useClaude && options.videoPath) {
+  // Claude API with tool use: auto-detected when API key is set
+  if (ANTHROPIC_API_KEY && options.videoPath) {
     try {
       setToolContext({ videoPath: options.videoPath });
       // Select only tools useful for the cut agent

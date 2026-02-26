@@ -7,17 +7,18 @@
  * - Retry with exponential backoff
  * - Streaming support
  *
- * Set LLM_PROVIDER=claude and ANTHROPIC_API_KEY to use Claude API.
- * Default: Ollama (local).
+ * Auto-detects Claude API if ANTHROPIC_API_KEY is set. Otherwise uses Ollama.
  */
 
-const LLM_PROVIDER = process.env.LLM_PROVIDER || "ollama";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434/v1/chat/completions";
 const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514";
 const VISION_MODEL = process.env.VISION_MODEL || "qwen2.5vl:7b";
 const TEXT_MODEL = process.env.TEXT_MODEL || VISION_MODEL;
+
+// Auto-detect: use Claude if API key is present, otherwise Ollama
+const LLM_PROVIDER = ANTHROPIC_API_KEY ? "claude" : "ollama";
 
 // ---------------------------------------------------------------------------
 // Retry with exponential backoff (cookbook pattern)
