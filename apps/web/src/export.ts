@@ -38,7 +38,7 @@ export async function exportWithEditPlan(
   videoUrl: string,
   filename: string,
   onProgress: (p: number) => void,
-  editPlan: Record<string, unknown>,
+  editPlan: object,
   apiBase: string = DEFAULT_API
 ): Promise<void> {
   onProgress(10);

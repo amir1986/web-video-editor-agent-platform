@@ -14,7 +14,8 @@
     "dev:web": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspace=apps/web",
     "lint": "npm run lint --workspace=apps/web --if-present",
-    "typecheck": "npm run typecheck --workspace=apps/web --if-present"
+    "typecheck": "npm run typecheck --workspace=apps/web --if-present",
+    "test": "npm run test --workspace=apps/api"
   },
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",
