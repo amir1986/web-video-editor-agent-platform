@@ -203,7 +203,7 @@ function runTransitionAgent(videoMeta, continuityResult) {
 // 5. Constraints Agent — validates the plan obeys all hard constraints
 // ---------------------------------------------------------------------------
 
-function runConstraintsAgent(videoMeta, segments, transitions) {
+function runConstraintsAgent(videoMeta, segments, transitions, sourceQuality) {
   const { duration, width, height } = videoMeta;
   const issues = [];
 
@@ -258,6 +258,9 @@ function runConstraintsAgent(videoMeta, segments, transitions) {
       no_stretch: true,
       target_width: width,
       target_height: height,
+      // Pass source bitrate so the renderer can match quality instead of guessing
+      source_video_bitrate: sourceQuality?.video?.bitrate || 0,
+      source_audio_bitrate: sourceQuality?.audio?.bitrate || 0,
     },
     notes: {
       constraints_ok,
@@ -290,7 +293,7 @@ function runConstraintsAgent(videoMeta, segments, transitions) {
  * @param {object} editPlan         - The plan from the Constraints Agent
  * @returns {object} editPlan with quality_guard section appended
  */
-function runQualityGuardAgent(videoMeta, editPlan) {
+function runQualityGuardAgent(videoMeta, editPlan, sourceQuality) {
   const { width, height, fps } = videoMeta;
   const rc = editPlan.render_constraints || {};
   const transitions = editPlan.transitions || [];
@@ -339,10 +342,15 @@ function runQualityGuardAgent(videoMeta, editPlan) {
   // ---- Check 5: Export settings not platform defaults ----
   // When re-encoding is required, enforce high-quality settings derived from source
   let exportSettingsOk = true;
+  // Source bitrate from probe — used to match quality instead of guessing with CRF
+  const srcVideoBitrate = sourceQuality?.video?.bitrate || rc.source_video_bitrate || 0;
+  const srcAudioBitrate = sourceQuality?.audio?.bitrate || rc.source_audio_bitrate || 0;
   const qualitySettings = {
     // Derived from source, not platform defaults
     codec: "libx264",
-    crf: 18,                // Visually lossless
+    crf: srcVideoBitrate > 0 ? null : 18,  // Only use CRF as fallback when bitrate unknown
+    source_video_bitrate: srcVideoBitrate,  // Preferred: match source bitrate exactly
+    source_audio_bitrate: srcAudioBitrate,
     preset: "medium",       // Good quality/speed tradeoff; never "ultrafast" or "veryfast"
     max_bitrate: null,      // No artificial cap
     pixel_format: "yuv420p",
@@ -387,7 +395,9 @@ function runQualityGuardAgent(videoMeta, editPlan) {
     target_width: width,
     target_height: height,
     codec: qualitySettings.codec,
-    crf: qualitySettings.crf,
+    crf: qualitySettings.crf,               // null when source bitrate is known
+    source_video_bitrate: srcVideoBitrate,   // renderer uses this to match quality
+    source_audio_bitrate: srcAudioBitrate,
     preset: qualitySettings.preset,
     pixel_format: qualitySettings.pixel_format,
     fps: fps,
@@ -473,11 +483,12 @@ function buildFallbackCutResult(duration) {
 /**
  * Run the multi-agent editing pipeline.
  *
- * @param {object} videoMeta - { duration, fps, width, height }
- * @param {Array}  frames    - [{ timestamp, base64 }, ...] (may be empty)
+ * @param {object} videoMeta     - { duration, fps, width, height }
+ * @param {Array}  frames        - [{ timestamp, base64 }, ...] (may be empty)
+ * @param {object} sourceQuality - Original video params from probeSourceQuality() (optional)
  * @returns {object} EditPlan JSON
  */
-async function runEditPipeline(videoMeta, frames = []) {
+async function runEditPipeline(videoMeta, frames = [], sourceQuality = null) {
   const log = (agent, msg) => console.log(`[${agent}] ${msg}`);
 
   // 1. Cut Agent
@@ -544,7 +555,8 @@ async function runEditPipeline(videoMeta, frames = []) {
   const constraintsPlan = runConstraintsAgent(
     videoMeta,
     continuityResult.segments || [],
-    transitionResult.transitions || []
+    transitionResult.transitions || [],
+    sourceQuality
   );
   log("CONSTRAINTS", constraintsPlan.notes.constraints_ok ? "All constraints OK" : `Issues: ${constraintsPlan.notes.issues?.join("; ")}`);
 
@@ -555,7 +567,7 @@ async function runEditPipeline(videoMeta, frames = []) {
   let editPlan = constraintsPlan;
   for (let attempt = 1; attempt <= MAX_QUALITY_RETRIES; attempt++) {
     log("QUALITY_GUARD", `Quality audit pass ${attempt}...`);
-    editPlan = runQualityGuardAgent(videoMeta, editPlan);
+    editPlan = runQualityGuardAgent(videoMeta, editPlan, sourceQuality);
 
     if (editPlan.quality_guard.required_fixes.length === 0) {
       log("QUALITY_GUARD", "All quality checks passed");

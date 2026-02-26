@@ -132,15 +132,127 @@ async function probeCanStreamCopy(wslIn) {
 }
 
 /**
+ * Probe the original video's full quality parameters.
+ * These are saved and reused when creating the processed output so that
+ * resolution, bitrate, frame-rate and audio settings match the source exactly.
+ */
+async function probeSourceQuality(wslIn) {
+  try {
+    const json = await ffprobe([
+      "-v", "error",
+      "-show_entries", "stream=codec_name,codec_type,width,height,r_frame_rate,bit_rate,pix_fmt,profile,level,sample_rate,channels",
+      "-show_entries", "format=bit_rate",
+      "-of", "json",
+      wslIn,
+    ]);
+    const data = JSON.parse(json);
+    const videoStream = (data.streams || []).find(s => s.codec_type === "video") || {};
+    const audioStream = (data.streams || []).find(s => s.codec_type === "audio") || {};
+    const format = data.format || {};
+
+    // Video frame rate
+    let fps = 30;
+    if (videoStream.r_frame_rate) {
+      const [num, den] = videoStream.r_frame_rate.split("/").map(Number);
+      if (num && den) fps = Math.round(num / den);
+    }
+
+    // Video bitrate: prefer stream-level, fall back to format-level (minus ~192k for audio)
+    let videoBitrate = parseInt(videoStream.bit_rate) || 0;
+    if (!videoBitrate && format.bit_rate) {
+      videoBitrate = Math.max(0, parseInt(format.bit_rate) - 192000);
+    }
+
+    // Audio bitrate
+    const audioBitrate = parseInt(audioStream.bit_rate) || 0;
+
+    const result = {
+      video: {
+        codec: videoStream.codec_name || "",
+        width: videoStream.width || 0,
+        height: videoStream.height || 0,
+        fps,
+        bitrate: videoBitrate,
+        pix_fmt: videoStream.pix_fmt || "yuv420p",
+        profile: videoStream.profile || "",
+      },
+      audio: {
+        codec: audioStream.codec_name || "",
+        bitrate: audioBitrate,
+        sample_rate: parseInt(audioStream.sample_rate) || 44100,
+        channels: audioStream.channels || 2,
+      },
+    };
+    console.log(`[PROBE] Source quality: ${result.video.width}x${result.video.height} ${result.video.fps}fps, v_bitrate=${result.video.bitrate}, a_bitrate=${result.audio.bitrate}, codec=${result.video.codec}/${result.video.pix_fmt}`);
+    return result;
+  } catch (err) {
+    console.log(`[PROBE] Failed to probe source quality: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Build ffmpeg encoding args that match the original source quality.
+ * Uses the source video bitrate (ABR) instead of CRF so the output
+ * has the same data-rate as the input — no quality guessing.
+ */
+function buildSourceMatchEncodingArgs(sourceQuality, rc) {
+  const vArgs = [];
+  const aArgs = [];
+
+  // Video encoding — match source bitrate when known, fallback to CRF 18
+  vArgs.push("-c:v", rc?.codec || "libx264");
+  if (sourceQuality?.video?.bitrate > 0) {
+    const vbr = String(sourceQuality.video.bitrate);
+    vArgs.push("-b:v", vbr, "-maxrate", vbr, "-bufsize", String(sourceQuality.video.bitrate * 2));
+  } else {
+    vArgs.push("-crf", String(rc?.crf || 18));
+  }
+  vArgs.push("-preset", rc?.preset || "medium");
+  vArgs.push("-pix_fmt", rc?.pixel_format || "yuv420p");
+
+  // Preserve resolution explicitly
+  if (sourceQuality?.video?.width > 0 && sourceQuality?.video?.height > 0) {
+    vArgs.push("-s", `${sourceQuality.video.width}x${sourceQuality.video.height}`);
+  }
+
+  // Preserve frame rate explicitly
+  if (sourceQuality?.video?.fps > 0) {
+    vArgs.push("-r", String(sourceQuality.video.fps));
+  }
+
+  vArgs.push("-movflags", "+faststart");
+
+  // Audio encoding — match source bitrate, sample rate, channels
+  if (sourceQuality?.audio?.bitrate > 0) {
+    aArgs.push("-c:a", "aac", "-b:a", String(sourceQuality.audio.bitrate));
+  } else {
+    aArgs.push("-c:a", "aac", "-b:a", "192k");
+  }
+  if (sourceQuality?.audio?.sample_rate) {
+    aArgs.push("-ar", String(sourceQuality.audio.sample_rate));
+  }
+  if (sourceQuality?.audio?.channels) {
+    aArgs.push("-ac", String(sourceQuality.audio.channels));
+  }
+
+  return { vArgs, aArgs };
+}
+
+/**
  * Render an EditPlan to a video file.
  *
  * Uses stream copy for hard_cut transitions when the source codec is universally
- * compatible (H.264 yuv420p). Otherwise re-encodes to H.264 High Profile yuv420p
- * to guarantee playback on all players (Windows, macOS, mobile).
+ * compatible (H.264 yuv420p). Otherwise re-encodes to H.264 using the source
+ * video's own bitrate/resolution/fps so the output matches the original quality.
  *
- * When re-encoding for transitions, preserves original resolution exactly.
+ * @param {string} wslIn          - WSL path to source video
+ * @param {object} editPlan       - The validated EditPlan
+ * @param {string} wslOut         - WSL path for output video
+ * @param {string} tmpDir         - Temp directory for intermediate files
+ * @param {object} sourceQuality  - Original video params from probeSourceQuality()
  */
-async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
+async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   const segments = editPlan.segments || [];
   if (!segments.length) throw new Error("EditPlan has no segments");
 
@@ -153,19 +265,15 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     }
   }
 
-  // Quality Guard render settings — use quality_guard-approved constraints
+  // Build encoding args that match the original source quality
   const rc = editPlan.render_constraints || {};
-  const qCodec = rc.codec || "libx264";
-  const qCrf = String(rc.crf || 18);
-  const qPreset = rc.preset || "medium";
-  const qPixFmt = rc.pixel_format || "yuv420p";
+  const { vArgs: srcVideoArgs, aArgs: srcAudioArgs } = buildSourceMatchEncodingArgs(sourceQuality, rc);
   const qFpsMode = rc.fps_mode || "cfr";
 
   // Check if source codec allows stream copy
   const canCopy = await probeCanStreamCopy(wslIn);
-  const reencodeArgs = ["-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-movflags", "+faststart"];
-  const copyOrReencode = canCopy ? ["-c", "copy"] : reencodeArgs;
-  const copyLabel = canCopy ? "stream copy" : "re-encode (compat)";
+  const copyOrReencode = canCopy ? ["-c", "copy"] : srcVideoArgs;
+  const copyLabel = canCopy ? "stream copy" : "re-encode (source-matched)";
 
   // Build a lookup of transitions by source segment id
   const transMap = {};
@@ -205,7 +313,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   // (hard_cut becomes a very short fade to keep the filter graph uniform).
   const FADE_DURATION = 0.5; // seconds for soft transition overlap
 
-  // Extract each segment to its own re-encoded file (needed for uniform filter graph)
+  // Extract each segment to its own file (stream copy — no quality loss yet)
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
@@ -274,14 +382,21 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     if (filterParts.length > 0) {
       const allFilters = hasAudio ? [...filterParts, ...audioParts] : filterParts;
       const filterComplex = allFilters.join(";");
-      const audioArgs = hasAudio ? ["-c:a", "aac", "-b:a", "192k"] : ["-an"];
+      const audioArgs = hasAudio ? srcAudioArgs : ["-an"];
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
-      console.log(`[RENDER] Quality settings: ${qCodec} crf=${qCrf} preset=${qPreset} pix_fmt=${qPixFmt}`);
+      console.log(`[RENDER] Source-matched quality: v_bitrate=${sourceQuality?.video?.bitrate || "crf-fallback"}, a_bitrate=${sourceQuality?.audio?.bitrate || "192k-fallback"}`);
       try {
         const finalMapArgs = hasAudio
           ? ["-map", lastVideoLabel, "-map", lastAudioLabel]
           : ["-map", lastVideoLabel];
-        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", filterComplex, ...finalMapArgs, "-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
+        // Strip -s, -r, -movflags from source-matched args (xfade handles resolution/fps; movflags added at end)
+        const skipFlags = new Set(["-s", "-r", "-movflags"]);
+        const cleanVideoArgs = [];
+        for (let j = 0; j < srcVideoArgs.length; j++) {
+          if (skipFlags.has(srcVideoArgs[j])) { j++; continue; } // skip flag and its value
+          cleanVideoArgs.push(srcVideoArgs[j]);
+        }
+        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", filterComplex, ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
       } catch (filterErr) {
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
@@ -335,11 +450,20 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   try {
     fs.writeFileSync(tmpIn, req.body);
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+
+    // Probe source quality BEFORE any processing
+    const sourceQuality = await probeSourceQuality(wslIn);
     const canCopy = await probeCanStreamCopy(wslIn);
-    const codecArgs = canCopy
-      ? ["-c", "copy"]
-      : ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
-    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode"})`);
+
+    let codecArgs;
+    if (canCopy) {
+      codecArgs = ["-c", "copy"];
+    } else {
+      // Re-encode using source-matched params (bitrate, resolution, fps)
+      const { vArgs } = buildSourceMatchEncodingArgs(sourceQuality, {});
+      codecArgs = vArgs;
+    }
+    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode source-matched"})`);
     await ffmpeg(["-y", "-loglevel", "error", "-ss", String(inSec), "-i", wslIn, "-t", String(outSec - inSec), ...codecArgs, "-avoid_negative_ts", "make_zero", wslOut]);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
@@ -370,6 +494,9 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
       try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
       return res.status(400).json({ error: "Could not determine video duration" });
     }
+    // Probe FULL source quality params BEFORE any processing
+    const sourceQuality = await probeSourceQuality(wslIn);
+
     const videoMeta = await probeVideoMeta(wslIn, duration);
     console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
 
@@ -380,15 +507,15 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
 
     // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
     console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
-    const editPlan = await runEditPipeline(videoMeta, frames);
+    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality);
 
     const segments = editPlan.segments || [];
     const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
     console.log(`[AUTO-EDIT] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
 
-    // Render the EditPlan to video
+    // Render the EditPlan to video using source-matched quality
     console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
-    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir);
+    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
 
     const summary = `${segments.length} highlights selected`;
     res.set("Content-Type", "video/mp4");
