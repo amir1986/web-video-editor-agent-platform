@@ -413,12 +413,19 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
           if (skipFlags.has(srcVideoArgs[j])) { j++; continue; } // skip flag and its value
           cleanVideoArgs.push(srcVideoArgs[j]);
         }
-        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", filterComplex, ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
+        // Write filter_complex to a script file to avoid shell escaping issues.
+        // WSL passes args through bash, which interprets semicolons as command
+        // separators — using -filter_complex_script bypasses this entirely.
+        const filterScriptPath = path.join(tmpDir, "filter.txt");
+        fs.writeFileSync(filterScriptPath, filterComplex);
+        console.log(`[RENDER] Filter script: ${filterComplex}`);
+        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex_script", toWslPath(filterScriptPath), ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
       } catch (filterErr) {
-        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
+        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to re-encode concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
         fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
+        // Re-encode fallback: use source-matched quality to preserve dimensions and bitrate
+        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
       }
     } else {
       const concatFile = path.join(tmpDir, "concat.txt");
