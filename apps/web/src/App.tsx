@@ -17,6 +17,7 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [agentSummary, setAgentSummary] = useState<string | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+  const [agentProgress, setAgentProgress] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportDone, setExportDone] = useState(false);
@@ -73,6 +74,7 @@ export default function App() {
     if (agentLoading || exporting) return;
     setAgentLoading(true);
     setAgentSummary(null);
+    setAgentProgress([]);
     setExportDone(false);
 
     const controller = new AbortController();
@@ -245,12 +247,12 @@ export default function App() {
         <div className="agent-header">
           <span className="pulse" />
           <span>AI Agent</span>
-          <span className="agent-model">qwen-vision</span>
+          <span className="agent-model">multi-agent</span>
         </div>
 
         <div className="agent-body">
           <div className="agent-desc">
-            Qwen will analyze your video frames and automatically find the best highlight moment, then download it.
+            AI agents will analyze your video frames and automatically find the best highlights, then download the result.
           </div>
 
           <button
@@ -263,9 +265,20 @@ export default function App() {
             ) : exporting ? (
               <><span className="spinner" /> Exporting {exportProgress}%...</>
             ) : (
-              <><span></span> Auto Edit with Vision</>
+              <><span></span> Auto Edit with AI</>
             )}
           </button>
+
+          {agentProgress.length > 0 && agentLoading && (
+            <div className="agent-progress">
+              {agentProgress.map((msg, i) => (
+                <div key={i} className="agent-progress-item">
+                  <span className="progress-dot" />
+                  <span>{msg}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {agentSummary && (
             <div className="agent-result">

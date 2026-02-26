@@ -10,45 +10,54 @@
  * The system produces an EditPlan JSON that an external renderer executes.
  * Agents ONLY handle: cuts, structure, continuity, transitions, constraint validation, quality auditing.
  * They do NOT do: color grading, audio mixing, music, captions, VFX, thumbnails.
+ *
+ * Claude Cookbook patterns applied:
+ * - Unified LLM client (Ollama + Claude API) with retry/backoff
+ * - Tool use / function calling for Claude API agents
+ * - RAG knowledge base injection for editing decisions
+ * - Prompt caching for repeated system prompts
+ * - Agentic loop for tool-calling agents
+ * - SSE progress events for real-time pipeline updates
  */
 
-const OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
-const VISION_MODEL = process.env.VISION_MODEL || "qwen2.5vl:7b";
-const TEXT_MODEL = process.env.TEXT_MODEL || VISION_MODEL;
+const { llmRequest, claudeAgentLoop, ANTHROPIC_API_KEY, LLM_PROVIDER } = require("./llm-client");
+const { TOOL_DEFINITIONS, TOOL_HANDLERS, setToolContext } = require("./tools");
+const { getEditingContext } = require("./knowledge-base");
 
 // ---------------------------------------------------------------------------
-// LLM helper
+// Progress event emitter (SSE support)
 // ---------------------------------------------------------------------------
 
-async function llmRequest(systemPrompt, userContent, { useVision = false, temperature = 0 } = {}) {
-  const messages = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userContent },
-  ];
-  const res = await fetch(OLLAMA_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: useVision ? VISION_MODEL : TEXT_MODEL,
-      messages,
-      temperature,
-      stream: false,
-    }),
-  });
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || "";
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("LLM returned no JSON: " + text.slice(0, 300));
-  return JSON.parse(match[0]);
+let _progressCallback = null;
+
+/**
+ * Set a callback for pipeline progress events.
+ * Used by the SSE endpoint to stream updates to the client.
+ *
+ * @param {function|null} cb - Callback(agent, message, data) or null to disable
+ */
+function setProgressCallback(cb) {
+  _progressCallback = cb;
+}
+
+function emitProgress(agent, message, data = {}) {
+  console.log(`[${agent}] ${message}`);
+  if (_progressCallback) {
+    try { _progressCallback(agent, message, data); } catch {}
+  }
 }
 
 // ---------------------------------------------------------------------------
 // 1. Cut Agent — selects the best parts and determines cut points
+//    Cookbook: Tool use + RAG knowledge injection + Vision
 // ---------------------------------------------------------------------------
 
-async function runCutAgent(videoMeta, frames) {
+async function runCutAgent(videoMeta, frames, options = {}) {
   const { duration, fps, width, height } = videoMeta;
   const timestamps = frames.map(f => `${f.timestamp}s`).join(", ");
+
+  // RAG: Inject relevant editing knowledge (cookbook pattern)
+  const ragContext = getEditingContext("cut selection highlight keep remove dead air", videoMeta);
 
   const systemPrompt = `You are the CUT AGENT — a world-class professional video editor whose only job is deciding what to keep and what to remove.
 
@@ -62,7 +71,7 @@ RULES:
 - KEEP: action, key points, emotional peaks, humor, strong visuals, story beats.
 - Segments must not overlap and must be sorted by src_in.
 - Do NOT change the resolution or aspect ratio. Your job is ONLY cut decisions.
-
+${ragContext}
 Return ONLY valid JSON:
 {"segments":[{"id":"s1","src_in":0,"src_out":8,"reason":"..."},...],"cut_notes":"<one sentence summary>"}`;
 
@@ -70,6 +79,36 @@ Return ONLY valid JSON:
 
 Analyze the video and decide which parts to keep for the highlight reel.`;
 
+  // Claude API with tool use: agent can call tools to gather more info
+  const useClaude = ANTHROPIC_API_KEY && LLM_PROVIDER === "claude";
+  if (useClaude && options.videoPath) {
+    try {
+      setToolContext({ videoPath: options.videoPath });
+      // Select only tools useful for the cut agent
+      const cutTools = TOOL_DEFINITIONS.filter(t =>
+        ["analyze_scene", "search_knowledge", "calculate_pacing"].includes(t.name)
+      );
+      const response = await claudeAgentLoop(
+        systemPrompt,
+        frames.length > 0
+          ? [{ type: "text", text: userText }, ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))]
+          : userText,
+        cutTools,
+        TOOL_HANDLERS,
+        { maxTurns: 3 }
+      );
+      // Extract JSON from response
+      const match = response.text.match(/\{[\s\S]*\}/);
+      if (match) {
+        const result = JSON.parse(match[0]);
+        if (result.segments?.length) return result;
+      }
+    } catch (err) {
+      emitProgress("CUT", `Claude tool-use failed (${err.message}), falling back to standard LLM`);
+    }
+  }
+
+  // Standard LLM path (Ollama or Claude without tools)
   const userContent = frames.length > 0
     ? [{ type: "text", text: userText }, ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))]
     : userText;
@@ -98,6 +137,9 @@ async function runStructureAgent(videoMeta, cutResult) {
   const { duration, width, height } = videoMeta;
   const segmentsJSON = JSON.stringify(cutResult.segments);
 
+  // RAG: Inject narrative and pacing knowledge (cookbook pattern)
+  const ragContext = getEditingContext("narrative structure hook climax pacing ordering engagement", videoMeta);
+
   const systemPrompt = `You are the STRUCTURE AGENT — a professional video editor who arranges selected clips into a coherent, engaging highlights edit.
 
 You receive segments chosen by the Cut Agent. Your job is to:
@@ -110,7 +152,7 @@ You receive segments chosen by the Cut Agent. Your job is to:
 Constraints: total kept duration must stay between 30%-75% of ${duration.toFixed(1)}s. Do NOT alter resolution (${width}x${height}).
 
 Input segments: ${segmentsJSON}
-
+${ragContext}
 Return ONLY valid JSON:
 {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"reason":"..."},...],"structure_notes":"<what you changed and why>"}`;
 
@@ -130,6 +172,9 @@ async function runContinuityAgent(videoMeta, structureResult) {
   const { duration } = videoMeta;
   const segmentsJSON = JSON.stringify(structureResult.segments);
 
+  // RAG: Inject continuity and transition knowledge (cookbook pattern)
+  const ragContext = getEditingContext("continuity jarring cuts smooth transition audio visual flow", videoMeta);
+
   const systemPrompt = `You are the CONTINUITY AGENT — an expert editor focused on smooth flow between cuts.
 
 You receive an ordered list of segments. Review adjacent pairs for potential jarring transitions:
@@ -147,7 +192,7 @@ Fixes you can make:
 IMPORTANT: Do NOT add new segments. Do NOT change resolution. Only adjust existing boundaries and flag transitions.
 
 Input segments: ${segmentsJSON}
-
+${ragContext}
 Return ONLY valid JSON:
 {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"reason":"...","needs_soft_transition":false},...],"continuity_notes":"<what you adjusted>"}`;
 
@@ -483,19 +528,26 @@ function buildFallbackCutResult(duration) {
 /**
  * Run the multi-agent editing pipeline.
  *
+ * Cookbook patterns:
+ * - SSE progress events via setProgressCallback()
+ * - Tool use for Cut Agent (when Claude API available)
+ * - RAG knowledge injection for all LLM agents
+ * - Retry with exponential backoff (via llm-client)
+ *
  * @param {object} videoMeta     - { duration, fps, width, height }
  * @param {Array}  frames        - [{ timestamp, base64 }, ...] (may be empty)
  * @param {object} sourceQuality - Original video params from probeSourceQuality() (optional)
+ * @param {object} options       - { videoPath } for tool use context
  * @returns {object} EditPlan JSON
  */
-async function runEditPipeline(videoMeta, frames = [], sourceQuality = null) {
-  const log = (agent, msg) => console.log(`[${agent}] ${msg}`);
+async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, options = {}) {
+  const log = (agent, msg) => emitProgress(agent, msg);
 
   // 1. Cut Agent
   log("CUT", "Selecting best segments...");
   let cutResult;
   try {
-    cutResult = await runCutAgent(videoMeta, frames);
+    cutResult = await runCutAgent(videoMeta, frames, { videoPath: options.videoPath });
     log("CUT", `Selected ${cutResult.segments?.length} segments: ${cutResult.cut_notes || ""}`);
   } catch (err) {
     log("CUT", `AI failed (${err.message}), using time-based fallback`);
@@ -507,7 +559,7 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null) {
     s => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in
   );
   if (!validSegments.length) {
-    log("CUT", "No valid segments from AI, using fallback");
+    emitProgress("CUT", "No valid segments from AI, using fallback");
     cutResult = buildFallbackCutResult(videoMeta.duration);
   } else {
     cutResult.segments = validSegments;
@@ -586,4 +638,4 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null) {
   return editPlan;
 }
 
-module.exports = { runEditPipeline, buildFallbackCutResult };
+module.exports = { runEditPipeline, buildFallbackCutResult, setProgressCallback };

@@ -6,7 +6,8 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "bot": "node --watch src/bot.js",
-    "bot:start": "node src/bot.js"
+    "bot:start": "node src/bot.js",
+    "mcp": "node src/mcp-server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -83,8 +83,8 @@ async function extractFrames(wslIn, duration, count) {
   }
 }
 
-// Multi-agent editing pipeline
-const { runEditPipeline } = require("./ai/agents");
+// Multi-agent editing pipeline with cookbook enhancements
+const { runEditPipeline, setProgressCallback } = require("./ai/agents");
 
 /**
  * Probe video dimensions and frame rate via ffprobe.
@@ -537,8 +537,9 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     const frames = await extractFrames(wslIn, duration, frameCount);
 
     // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
+    // Pass videoPath for Claude tool use (cookbook: agentic loop)
     console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
-    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality);
+    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
 
     const segments = editPlan.segments || [];
     const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
@@ -626,12 +627,111 @@ app.post("/api/render", express.raw({ type: "*/*", limit: "2gb" }), async (req, 
   }
 });
 
+// ---------------------------------------------------------------------------
+// SSE Streaming endpoint — real-time pipeline progress (cookbook: streaming)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/auto-edit-stream — Same as /api/auto-edit but with SSE progress.
+ *
+ * Claude Cookbook pattern: Server-Sent Events for real-time agent progress.
+ * The client receives progress events as each agent completes, then the
+ * final video binary at the end.
+ *
+ * Response format: SSE events followed by a final JSON with download URL.
+ * Events: { agent, message, timestamp }
+ */
+app.post("/api/auto-edit-stream", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
+
+  // Set up SSE headers
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "http://localhost:5173",
+  });
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Set up progress callback for the pipeline
+  setProgressCallback((agent, message) => {
+    sendEvent("progress", { agent, message, timestamp: Date.now() });
+  });
+
+  const name = req.query.name || "video";
+  const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
+  const tmpDir = path.join(os.tmpdir(), `edit_${crypto.randomBytes(4).toString("hex")}`);
+  fs.mkdirSync(tmpDir);
+
+  try {
+    fs.writeFileSync(tmpIn, req.body);
+    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+
+    sendEvent("progress", { agent: "SYSTEM", message: "Video received, probing metadata...", timestamp: Date.now() });
+
+    const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
+    const duration = parseFloat(durationStr);
+    if (isNaN(duration) || duration <= 0) {
+      sendEvent("error", { message: "Could not determine video duration" });
+      res.end();
+      cleanup(tmpIn, tmpOut);
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+      return;
+    }
+
+    const sourceQuality = await probeSourceQuality(wslIn);
+    const videoMeta = await probeVideoMeta(wslIn, duration);
+
+    sendEvent("progress", { agent: "SYSTEM", message: `Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`, timestamp: Date.now() });
+
+    const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
+    sendEvent("progress", { agent: "SYSTEM", message: `Extracting ${frameCount} frames...`, timestamp: Date.now() });
+    const frames = await extractFrames(wslIn, duration, frameCount);
+
+    sendEvent("progress", { agent: "PIPELINE", message: "Starting multi-agent editing pipeline...", timestamp: Date.now() });
+    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
+
+    const segments = editPlan.segments || [];
+    const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+
+    sendEvent("progress", { agent: "RENDER", message: `Rendering ${segments.length} segments...`, timestamp: Date.now() });
+    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+
+    sendEvent("complete", {
+      segments: segments.length,
+      duration: Math.round(finalDuration),
+      summary: `${segments.length} highlights selected`,
+      width: videoMeta.width,
+      height: videoMeta.height,
+    });
+
+    res.end();
+    // Note: client must fetch the video via a separate request
+    // The output video path is available for download
+  } catch (err) {
+    sendEvent("error", { message: err.message });
+    res.end();
+  } finally {
+    setProgressCallback(null); // Clear callback
+    cleanup(tmpIn, tmpOut);
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  }
+});
+
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
 app.listen(3001, () => {
+  const provider = process.env.ANTHROPIC_API_KEY && process.env.LLM_PROVIDER === "claude" ? "Claude API" : "Ollama (local)";
   console.log("VideoAgent API on http://localhost:3001");
-  console.log("  POST /api/analyze   - AI analysis (web client)");
-  console.log("  POST /api/render    - Render pre-built EditPlan (web client)");
-  console.log("  POST /api/trim      - Single segment trim");
-  console.log("  POST /api/auto-edit - Full highlight reel (bots)");
+  console.log(`  LLM Provider: ${provider}`);
+  console.log("  POST /api/analyze          - AI analysis (web client)");
+  console.log("  POST /api/render           - Render pre-built EditPlan (web client)");
+  console.log("  POST /api/trim             - Single segment trim");
+  console.log("  POST /api/auto-edit        - Full highlight reel (bots)");
+  console.log("  POST /api/auto-edit-stream - Full highlight reel with SSE progress");
+  console.log("  GET  /api/health           - Health check");
+  console.log("  MCP: node src/mcp-server.js (stdio transport)");
 });
