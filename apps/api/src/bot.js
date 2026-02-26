@@ -240,6 +240,9 @@ bot.on("video", async (msg) => {
 
     const summary = res.headers.get("x-ai-summary") || "";
     const segCount = res.headers.get("x-segments-count") || "?";
+    const videoWidth = parseInt(res.headers.get("x-video-width")) || undefined;
+    const videoHeight = parseInt(res.headers.get("x-video-height")) || undefined;
+    const videoDuration = parseInt(res.headers.get("x-video-duration")) || undefined;
 
     // Compress if needed (Telegram-only 50MB limit) and send
     let fileToSend = tmpOut;
@@ -271,7 +274,7 @@ bot.on("video", async (msg) => {
 
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
-      await bot.sendVideo(chatId, fileToSend, { caption });
+      await bot.sendVideo(chatId, fileToSend, { caption, width: videoWidth, height: videoHeight, duration: videoDuration, supports_streaming: true });
       console.log(`[VIDEO] sendVideo OK`);
     } catch (sendErr) {
       console.log(`[VIDEO] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
@@ -348,6 +351,9 @@ bot.on("document", async (msg) => {
 
     const summary = res.headers.get("x-ai-summary") || "";
     const segCount = res.headers.get("x-segments-count") || "?";
+    const videoWidth = parseInt(res.headers.get("x-video-width")) || undefined;
+    const videoHeight = parseInt(res.headers.get("x-video-height")) || undefined;
+    const videoDuration = parseInt(res.headers.get("x-video-duration")) || undefined;
 
     // Compress if needed (Telegram-only 50MB limit) and send
     let fileToSend = tmpOut;
@@ -379,7 +385,7 @@ bot.on("document", async (msg) => {
 
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
-      await bot.sendVideo(chatId, fileToSend, { caption });
+      await bot.sendVideo(chatId, fileToSend, { caption, width: videoWidth, height: videoHeight, duration: videoDuration, supports_streaming: true });
       console.log(`[DOC] sendVideo OK`);
     } catch (sendErr) {
       console.log(`[DOC] sendVideo failed (${sendErr.message}), falling back to sendDocument`);

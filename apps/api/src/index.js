@@ -214,15 +214,15 @@ function buildSourceMatchEncodingArgs(sourceQuality, rc) {
   const vArgs = [];
   const aArgs = [];
 
-  // Video encoding — match source bitrate when known, fallback to CRF 18
+  // Video encoding — CRF 18 (visually lossless) capped at source bitrate
   vArgs.push("-c:v", rc?.codec || "libx264");
   if (sourceQuality?.video?.bitrate > 0) {
     const vbr = String(sourceQuality.video.bitrate);
-    vArgs.push("-b:v", vbr, "-maxrate", vbr, "-bufsize", String(sourceQuality.video.bitrate * 2));
+    vArgs.push("-crf", String(rc?.crf || 18), "-maxrate", vbr, "-bufsize", String(sourceQuality.video.bitrate * 2));
   } else {
     vArgs.push("-crf", String(rc?.crf || 18));
   }
-  vArgs.push("-preset", rc?.preset || "fast");
+  vArgs.push("-preset", rc?.preset || "medium");
   vArgs.push("-pix_fmt", rc?.pixel_format || "yuv420p");
 
   // Preserve resolution explicitly
@@ -558,6 +558,9 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
     res.set("X-AI-Summary", summary);
     res.set("X-Segments-Count", String(segments.length));
+    res.set("X-Video-Width", String(videoMeta.width));
+    res.set("X-Video-Height", String(videoMeta.height));
+    res.set("X-Video-Duration", String(Math.round(finalDuration)));
     res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
   } catch (err) {
     cleanup(tmpIn, tmpOut);
