@@ -1,5 +1,13 @@
 const DEFAULT_API = "http://localhost:3001";
 
+async function fetchVideoBlob(videoUrl: string): Promise<Blob> {
+  const res = await fetch(videoUrl);
+  if (!res.ok) throw new Error(`Failed to load video (${res.status})`);
+  const blob = await res.blob();
+  if (blob.size === 0) throw new Error("Video file is empty — please re-import the video");
+  return blob;
+}
+
 export async function exportTrimmed(
   videoUrl: string,
   inSec: number,
@@ -9,8 +17,7 @@ export async function exportTrimmed(
   apiBase: string = DEFAULT_API
 ): Promise<void> {
   onProgress(10);
-  const videoRes = await fetch(videoUrl);
-  const videoBlob = await videoRes.blob();
+  const videoBlob = await fetchVideoBlob(videoUrl);
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
@@ -34,8 +41,7 @@ export async function exportWithEditPlan(
   apiBase: string = DEFAULT_API
 ): Promise<void> {
   onProgress(10);
-  const videoRes = await fetch(videoUrl);
-  const videoBlob = await videoRes.blob();
+  const videoBlob = await fetchVideoBlob(videoUrl);
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));

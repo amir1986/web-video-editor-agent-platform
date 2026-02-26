@@ -61,7 +61,8 @@ async function extractFrames(wslIn, duration, count) {
   const interval = duration / count;
   try {
     // scale=320:-2 preserves original aspect ratio (height auto-calculated, divisible by 2)
-    await ffmpeg(`-i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
+    // -loglevel error suppresses the version banner so errors are readable
+    await ffmpeg(`-loglevel error -i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
     const frames = fs.readdirSync(framesDir)
       .filter(f => f.endsWith(".jpg")).sort()
       .map((f, i) => ({
@@ -119,7 +120,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   if (segments.length === 1 && !needsReencode) {
     const seg = segments[0];
     console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
-    await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
+    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
     return;
   }
 
@@ -130,12 +131,12 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
       const seg = segments[i];
       const segPath = path.join(tmpDir, `seg_${i}.mp4`);
       console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
-      await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+      await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
       segFiles.push(segPath);
     }
     const concatFile = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+    await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
     for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
     return;
   }
@@ -151,7 +152,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
     console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s`);
-    await ffmpeg(`-y -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
     segFiles.push(segPath);
   }
 
@@ -220,18 +221,18 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
       const audioArgs = hasAudio ? "-c:a aac -b:a 192k" : "-an";
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
       try {
-        await ffmpeg(`-y ${inputs} -filter_complex "${filterComplex}" ${mapArgs} -c:v libx264 -crf 18 -preset medium ${audioArgs} -movflags +faststart "${wslOut}"`);
+        await ffmpeg(`-y -loglevel error ${inputs} -filter_complex "${filterComplex}" ${mapArgs} -c:v libx264 -crf 18 -preset medium ${audioArgs} -movflags +faststart "${wslOut}"`);
       } catch (filterErr) {
         // If filter_complex fails, fall back to simple concat
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
         fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+        await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
       }
     } else {
       const concatFile = path.join(tmpDir, "concat.txt");
       fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-      await ffmpeg(`-y -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+      await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
     }
   } finally {
     for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
@@ -263,6 +264,7 @@ app.post("/api/analyze", async (req, res) => {
 
 //  POST /api/trim 
 app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
   const name   = req.query.name || "highlight";
@@ -273,7 +275,7 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
     fs.writeFileSync(tmpIn, req.body);
     console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s`);
     // Stream copy: no re-encoding, preserves original quality/resolution/rotation/aspect ratio
-    await ffmpeg(`-y -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
+    await ffmpeg(`-y -loglevel error -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
@@ -285,6 +287,7 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
 
 //  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
 app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name   = req.query.name || "video";
   const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   const tmpDir = path.join(os.tmpdir(), `edit_${crypto.randomBytes(4).toString("hex")}`);

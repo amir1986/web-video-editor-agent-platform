@@ -23,7 +23,17 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    loadFromDB().then((s) => { if (s) setState(s as ProjectState); }).catch(console.error);
+    loadFromDB().then((s) => {
+      if (!s) return;
+      const restored = s as ProjectState;
+      // Blob URLs don't survive page reloads — drop stale clips
+      restored.clips = restored.clips.filter(c => !c.url.startsWith("blob:"));
+      if (restored.clips.length === 0) {
+        restored.inOut = { in: 0, out: 0 };
+        restored.editPlan = undefined;
+      }
+      setState(restored);
+    }).catch(console.error);
   }, []);
 
   const save = (newState: ProjectState) => { setState(newState); saveToDB(newState).catch(console.error); };
