@@ -3,10 +3,18 @@ name: AI PR Review
 on:
   pull_request:
     types: [opened, synchronize]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Run on PR events, or after CI completes (only on success)
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
     permissions:
       pull-requests: write
       contents: read
@@ -29,6 +37,6 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
           REPO: ${{ github.repository }}
         run: python .github/scripts/review_pr.py

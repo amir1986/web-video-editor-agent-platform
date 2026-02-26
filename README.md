@@ -203,17 +203,37 @@ Ollama must be running on `http://localhost:11434` (the default).
 | `npm run lint` | Root | Lint the web UI |
 | `npm run typecheck` | Root | Type-check the web UI |
 
-## GitHub AI Automation
+## CI/CD Pipeline
 
-This repository includes GitHub Actions workflows powered by the Claude API that automate code review, conflict resolution, and on-demand AI tasks.
+Every Pull Request goes through an automated pipeline before it can be merged:
+
+```
+PR Opened / Updated
+  │
+  ├── CI Checks (parallel)
+  │     ├── Lint ──────────── ESLint on web UI
+  │     ├── Type Check ────── TypeScript --noEmit
+  │     ├── Validate Schemas── Python eval_script.py
+  │     └── Build ─────────── Vite production build (after lint + typecheck pass)
+  │
+  ├── AI PR Review ────────── Claude reviews diff for security, quality, tests
+  │
+  └── Merge Conflict Check ── Claude suggests conflict resolutions if needed
+        │
+        ▼
+  All checks pass → Auto-merge (if labeled 'auto-merge' or Dependabot PR)
+```
 
 ### Workflows
 
 | Workflow | Trigger | File | Description |
 |---|---|---|---|
-| **AI PR Review** | PR opened / updated | `.github/workflows/pr-review.yml` | Fetches the PR diff, sends it to Claude, and posts a review comment with security, error-handling, test, and quality feedback |
-| **Merge Conflict Resolver** | PR opened / updated | `.github/workflows/merge-conflict.yml` | Detects merge conflicts with `main`, asks Claude for resolution suggestions, and posts them as a PR comment |
-| **Auto Commit Task** | `/ai-run` comment on an issue | `.github/workflows/auto-commit.yml` | Parses the comment, asks Claude to generate files, commits and pushes the result |
+| **CI** | PR or push to `master` | `.github/workflows/ci.yml` | Runs lint, typecheck, schema validation, and build |
+| **AI PR Review** | PR opened / updated | `.github/workflows/pr-review.yml` | Claude reviews the diff and posts a comment |
+| **Merge Conflict Resolver** | PR opened / updated | `.github/workflows/merge-conflict.yml` | Detects conflicts with `master` and posts AI resolution suggestions |
+| **Auto Commit Task** | `/ai-run` comment on an issue | `.github/workflows/auto-commit.yml` | Claude generates files from instructions, commits and pushes |
+| **Auto Merge** | Checks pass / PR review | `.github/workflows/auto-merge.yml` | Auto-merges Dependabot PRs or PRs labeled `auto-merge` |
+| **Evaluation** | PR or push to `master` | `.github/workflows/eval.yml` | Runs the Python evaluation script |
 
 ### Setup
 
@@ -221,14 +241,23 @@ This repository includes GitHub Actions workflows powered by the Claude API that
    - Go to **Settings → Secrets and variables → Actions → New repository secret**
    - Name: `ANTHROPIC_API_KEY`, Value: your key from [console.anthropic.com](https://console.anthropic.com)
 
-2. **(Optional) Add notification webhooks** for Slack or Discord:
+2. **(Recommended) Enable branch protection** on `master`:
+   - Go to **Settings → Branches → Add branch protection rule**
+   - Branch name pattern: `master`
+   - Enable: **Require status checks to pass before merging**
+   - Required checks: `Lint`, `Type Check`, `Build`, `Validate Schemas`
+   - Enable: **Require pull request reviews before merging** (optional)
+
+3. **(Optional) Add notification webhooks** for Slack or Discord:
    - `SLACK_WEBHOOK_URL` — Slack incoming webhook URL
    - `DISCORD_WEBHOOK_URL` — Discord webhook URL
 
 ### Usage
 
-- **PR Reviews** happen automatically — open or push to a PR and Claude will comment within a couple of minutes.
-- **Conflict Resolution** is automatic — if a PR has merge conflicts with `main`, Claude posts suggested resolutions.
+- **CI Checks** run automatically on every PR — lint, typecheck, and build must pass before merging.
+- **AI PR Reviews** happen automatically — Claude comments on every PR within a couple of minutes.
+- **Conflict Resolution** is automatic — if a PR has merge conflicts, Claude posts suggested resolutions.
+- **Auto-Merge** — add the `auto-merge` label to any PR to merge it automatically once all checks pass.
 - **On-Demand Tasks** — comment `/ai-run <instruction>` on any issue, e.g.:
   ```
   /ai-run Create a blog post about Python tips and save it to blog/python-tips.md
