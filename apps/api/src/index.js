@@ -108,6 +108,15 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   const segments = editPlan.segments || [];
   if (!segments.length) throw new Error("EditPlan has no segments");
 
+  // Quality Guard render settings — use quality_guard-approved constraints
+  const rc = editPlan.render_constraints || {};
+  const qCodec = rc.codec || "libx264";
+  const qCrf = rc.crf || 18;
+  const qPreset = rc.preset || "medium";
+  const qPixFmt = rc.pixel_format || "yuv420p";
+  const qSar = rc.sar || "1:1";
+  const qFpsMode = rc.fps_mode || "cfr";
+
   // Build a lookup of transitions by source segment id
   const transMap = {};
   for (const t of (editPlan.transitions || [])) {
@@ -220,8 +229,14 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
         : `-map "${lastVideoLabel}"`;
       const audioArgs = hasAudio ? "-c:a aac -b:a 192k" : "-an";
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
+      console.log(`[RENDER] Quality settings: ${qCodec} crf=${qCrf} preset=${qPreset} pix_fmt=${qPixFmt} sar=${qSar}`);
       try {
-        await ffmpeg(`-y -loglevel error ${inputs} -filter_complex "${filterComplex}" ${mapArgs} -c:v libx264 -crf 18 -preset medium ${audioArgs} -movflags +faststart "${wslOut}"`);
+        const sarFilter = `${lastVideoLabel}setsar=${qSar}[vout]`;
+        const fullFilterComplex = `${filterComplex};${sarFilter}`;
+        const finalMapArgs = hasAudio
+          ? `-map "[vout]" -map "${lastAudioLabel}"`
+          : `-map "[vout]"`;
+        await ffmpeg(`-y -loglevel error ${inputs} -filter_complex "${fullFilterComplex}" ${finalMapArgs} -c:v ${qCodec} -crf ${qCrf} -preset ${qPreset} -pix_fmt ${qPixFmt} -fps_mode ${qFpsMode} ${audioArgs} -movflags +faststart "${wslOut}"`);
       } catch (filterErr) {
         // If filter_complex fails, fall back to simple concat
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);

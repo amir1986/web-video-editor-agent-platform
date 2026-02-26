@@ -7,7 +7,7 @@ import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
 preloadFFmpeg().catch(console.error);
 
 interface Clip { id: string; name: string; url: string; duration: number; }
-interface EditPlan { segments: { id: string; src_in: number; src_out: number }[]; transitions?: { from: string; to: string; type: string }[]; render_constraints?: Record<string, unknown>; notes?: Record<string, unknown>; }
+interface EditPlan { segments: { id: string; src_in: number; src_out: number }[]; transitions?: { from: string; to: string; type: string }[]; render_constraints?: Record<string, unknown>; notes?: Record<string, unknown>; quality_guard?: { constraints_ok: boolean; checks: Record<string, boolean>; required_fixes: string[] }; }
 interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; editPlan?: EditPlan; }
 const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [] };
 

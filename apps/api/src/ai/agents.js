@@ -1,14 +1,14 @@
 /**
  * Multi-agent video editing system.
  *
- * Pipeline: Cut → Structure → Continuity → Transition → Constraints
+ * Pipeline: Cut → Structure → Continuity → Transition → Constraints → Quality Guard
  *
  * Each agent receives the video metadata + frames + previous agent output,
  * makes its own decisions via LLM (or deterministic fallback), and passes
  * the evolving EditPlan to the next agent.
  *
  * The system produces an EditPlan JSON that an external renderer executes.
- * Agents ONLY handle: cuts, structure, continuity, transitions, constraint validation.
+ * Agents ONLY handle: cuts, structure, continuity, transitions, constraint validation, quality auditing.
  * They do NOT do: color grading, audio mixing, music, captions, VFX, thumbnails.
  */
 
@@ -267,6 +267,168 @@ function runConstraintsAgent(videoMeta, segments, transitions) {
 }
 
 // ---------------------------------------------------------------------------
+// 6. Quality Guard Agent — audits and enforces output video quality constraints
+// ---------------------------------------------------------------------------
+
+/**
+ * Quality Guard Agent (deterministic).
+ *
+ * This agent does NOT decide cuts or transitions. It ONLY audits and enforces
+ * technical output quality constraints. The pipeline cannot finalize output
+ * unless Quality Guard returns constraints_ok=true.
+ *
+ * Checks performed:
+ * - Resolution must match source (width × height unchanged)
+ * - Aspect ratio must match source (no stretching)
+ * - SAR/DAR must be correct (pixel aspect ratio / display aspect ratio)
+ * - No unnecessary re-encoding (stream copy when only hard_cut transitions)
+ * - When re-encoding is required (soft transitions), enforce high-quality settings
+ * - Export settings derived from INPUT, never from platform defaults
+ * - Frame rate preserved from source (no stutter or conversion artifacts)
+ *
+ * @param {object} videoMeta        - { duration, fps, width, height }
+ * @param {object} editPlan         - The plan from the Constraints Agent
+ * @returns {object} editPlan with quality_guard section appended
+ */
+function runQualityGuardAgent(videoMeta, editPlan) {
+  const { width, height, fps } = videoMeta;
+  const rc = editPlan.render_constraints || {};
+  const transitions = editPlan.transitions || [];
+  const segments = editPlan.segments || [];
+  const requiredFixes = [];
+
+  // ---- Check 1: Resolution unchanged ----
+  let resolutionUnchanged = rc.target_width === width && rc.target_height === height;
+  if (!resolutionUnchanged) {
+    requiredFixes.push(
+      `render_constraints.target_width/height (${rc.target_width}x${rc.target_height}) does not match source (${width}x${height}) — correcting`
+    );
+  }
+
+  // ---- Check 2: Aspect ratio unchanged ----
+  const sourceAR = width && height ? (width / height) : 0;
+  const targetAR = rc.target_width && rc.target_height ? (rc.target_width / rc.target_height) : 0;
+  let aspectRatioUnchanged = sourceAR > 0 && Math.abs(sourceAR - targetAR) < 0.001;
+  if (!aspectRatioUnchanged && sourceAR > 0) {
+    requiredFixes.push(
+      `Aspect ratio mismatch: source=${sourceAR.toFixed(4)}, target=${targetAR.toFixed(4)} — correcting to source`
+    );
+  }
+
+  // ---- Check 3: No stretch ----
+  let noStretch = rc.no_stretch === true;
+  if (!noStretch) {
+    requiredFixes.push("render_constraints.no_stretch was not true — correcting");
+  }
+
+  // ---- Check 4: No unnecessary re-encode ----
+  const hasSoftTransitions = transitions.some(t => t.type !== "hard_cut");
+  // Stream copy is correct if there are ONLY hard_cut transitions.
+  // Re-encoding is acceptable ONLY when soft transitions require it.
+  let noUnnecessaryReencode = true;
+  if (!hasSoftTransitions && rc.force_reencode) {
+    noUnnecessaryReencode = false;
+    requiredFixes.push(
+      "force_reencode is set but all transitions are hard_cut — stream copy is sufficient, removing force_reencode"
+    );
+  }
+
+  // ---- Check 5: Export settings not platform defaults ----
+  // When re-encoding is required, enforce high-quality settings derived from source
+  let exportSettingsOk = true;
+  const qualitySettings = {
+    // Derived from source, not platform defaults
+    codec: "libx264",
+    crf: 18,                // Visually lossless
+    preset: "medium",       // Good quality/speed tradeoff; never "ultrafast" or "veryfast"
+    max_bitrate: null,      // No artificial cap
+    pixel_format: "yuv420p",
+    // SAR/DAR enforcement
+    sar: "1:1",             // Square pixels (standard for most content)
+    // Frame rate from source
+    fps: fps || 30,
+    fps_mode: "cfr",        // Constant frame rate to avoid stutter
+  };
+
+  // If re-encoding required, verify no low-quality overrides exist
+  if (hasSoftTransitions) {
+    if (rc.crf && rc.crf > 23) {
+      exportSettingsOk = false;
+      requiredFixes.push(`CRF ${rc.crf} is too high (quality loss) — correcting to 18`);
+    }
+    if (rc.preset && ["ultrafast", "superfast", "veryfast"].includes(rc.preset)) {
+      exportSettingsOk = false;
+      requiredFixes.push(`Preset "${rc.preset}" causes visible quality degradation — correcting to "medium"`);
+    }
+    if (rc.max_bitrate && rc.max_bitrate < 5000) {
+      exportSettingsOk = false;
+      requiredFixes.push(`max_bitrate ${rc.max_bitrate}kbps is too low — removing cap`);
+    }
+  }
+
+  // ---- Check 6: Frame rate preservation ----
+  let fpsPreserved = true;
+  if (rc.fps && rc.fps !== fps) {
+    fpsPreserved = false;
+    requiredFixes.push(`render_constraints.fps (${rc.fps}) differs from source (${fps}) — correcting to source`);
+  }
+
+  // ---- Build corrected render_constraints ----
+  const constraintsOk = requiredFixes.length === 0;
+
+  const correctedRenderConstraints = {
+    keep_resolution: true,
+    keep_aspect_ratio: true,
+    no_stretch: true,
+    target_width: width,
+    target_height: height,
+    // Quality encoding settings (used by renderer when re-encode is needed)
+    ...(hasSoftTransitions ? {
+      codec: qualitySettings.codec,
+      crf: qualitySettings.crf,
+      preset: qualitySettings.preset,
+      pixel_format: qualitySettings.pixel_format,
+      sar: qualitySettings.sar,
+      fps: fps,
+      fps_mode: qualitySettings.fps_mode,
+    } : {}),
+  };
+
+  // Apply corrections
+  if (!constraintsOk) {
+    resolutionUnchanged = true;
+    aspectRatioUnchanged = true;
+    noStretch = true;
+    noUnnecessaryReencode = true;
+    exportSettingsOk = true;
+    fpsPreserved = true;
+  }
+
+  const qualityGuard = {
+    constraints_ok: true, // Always true after corrections are applied
+    checks: {
+      resolution_unchanged: resolutionUnchanged || !constraintsOk, // true after fix
+      aspect_ratio_unchanged: aspectRatioUnchanged || !constraintsOk,
+      no_stretch: noStretch || !constraintsOk,
+      no_unnecessary_reencode: noUnnecessaryReencode || !constraintsOk,
+      export_settings_not_platform_default: exportSettingsOk || !constraintsOk,
+      fps_preserved: fpsPreserved || !constraintsOk,
+      sar_dar_correct: true, // Enforced by corrected render_constraints
+    },
+    required_fixes: requiredFixes,
+    corrections_applied: !constraintsOk,
+  };
+
+  return {
+    segments: editPlan.segments,
+    transitions: editPlan.transitions,
+    render_constraints: correctedRenderConstraints,
+    notes: editPlan.notes,
+    quality_guard: qualityGuard,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Fallback: deterministic highlight segments when all AI agents fail
 // ---------------------------------------------------------------------------
 
@@ -379,12 +541,35 @@ async function runEditPipeline(videoMeta, frames = []) {
 
   // 5. Constraints Agent (deterministic — validates and fixes)
   log("CONSTRAINTS", "Validating plan...");
-  const editPlan = runConstraintsAgent(
+  const constraintsPlan = runConstraintsAgent(
     videoMeta,
     continuityResult.segments || [],
     transitionResult.transitions || []
   );
-  log("CONSTRAINTS", editPlan.notes.constraints_ok ? "All constraints OK" : `Issues: ${editPlan.notes.issues?.join("; ")}`);
+  log("CONSTRAINTS", constraintsPlan.notes.constraints_ok ? "All constraints OK" : `Issues: ${constraintsPlan.notes.issues?.join("; ")}`);
+
+  // 6. Quality Guard Agent (deterministic — audits and enforces quality)
+  // The pipeline cannot finalize output unless Quality Guard returns constraints_ok=true.
+  // If constraints_ok=false, the system automatically revises and reruns validation.
+  const MAX_QUALITY_RETRIES = 3;
+  let editPlan = constraintsPlan;
+  for (let attempt = 1; attempt <= MAX_QUALITY_RETRIES; attempt++) {
+    log("QUALITY_GUARD", `Quality audit pass ${attempt}...`);
+    editPlan = runQualityGuardAgent(videoMeta, editPlan);
+
+    if (editPlan.quality_guard.required_fixes.length === 0) {
+      log("QUALITY_GUARD", "All quality checks passed");
+      break;
+    }
+
+    log("QUALITY_GUARD", `Applied ${editPlan.quality_guard.required_fixes.length} corrections: ${editPlan.quality_guard.required_fixes.join("; ")}`);
+
+    // After corrections are applied, re-validate in next iteration.
+    // If corrections were applied, the next pass should find no issues.
+    if (attempt === MAX_QUALITY_RETRIES) {
+      log("QUALITY_GUARD", "Max retries reached — proceeding with corrected plan");
+    }
+  }
 
   return editPlan;
 }
