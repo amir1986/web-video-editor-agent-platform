@@ -8,7 +8,10 @@
     "packages/core"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=apps/web",
+    "dev": "concurrently -n api,bot,web -c blue,magenta,green \"npm run dev --workspace=apps/api\" \"npm run bot --workspace=apps/api\" \"npm run dev --workspace=apps/web\"",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:bot": "npm run bot --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspace=apps/web",
     "lint": "npm run lint --workspace=apps/web --if-present",
     "typecheck": "npm run typecheck --workspace=apps/web --if-present"
@@ -16,5 +19,8 @@
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",
     "telegram": "^2.26.22"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }
