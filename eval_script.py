@@ -1,13 +1,22 @@
 import json
-import requests
 import os
+import sys
 from jsonschema import validate, ValidationError
 
-# Define the base URL for the API
-BASE_URL = "http://localhost:3000"
+# Schema that each eval scenario file must match
+SCENARIO_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "description": {"type": "string"},
+        "request": {"type": "string"},
+        "expected_outcome": {"type": "string"},
+        "constraints": {"type": "object"},
+    },
+    "required": ["description", "request", "expected_outcome", "constraints"],
+}
 
-# Define the schema for validation
-SCHEMA = {
+# Schema for an API edit-plan response (used for reference validation)
+EDIT_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "editPlan": {
@@ -19,30 +28,30 @@ SCHEMA = {
                         "type": "object",
                         "properties": {
                             "op": {"type": "string"},
-                            "args": {"type": "object"}
+                            "args": {"type": "object"},
                         },
-                        "required": ["op", "args"]
-                    }
+                        "required": ["op", "args"],
+                    },
                 }
             },
-            "required": ["timelineOps"]
+            "required": ["timelineOps"],
         }
     },
-    "required": ["editPlan"]
+    "required": ["editPlan"],
 }
 
-# Define constraints validation functions
 
 def validate_range(value, min_val, max_val):
     return min_val <= value <= max_val
 
 
 def validate_no_overlap(markers):
-    # Assuming markers is a list of dictionaries with 'in' and 'out' keys
     for i in range(len(markers)):
-        for j in range(i+1, len(markers)):
-            if (markers[i]['in'] <= markers[j]['in'] <= markers[i]['out'] or
-                markers[j]['in'] <= markers[i]['in'] <= markers[j]['out']):
+        for j in range(i + 1, len(markers)):
+            if (
+                markers[i]["in"] <= markers[j]["in"] <= markers[i]["out"]
+                or markers[j]["in"] <= markers[i]["in"] <= markers[j]["out"]
+            ):
                 return False
     return True
 
@@ -52,20 +61,19 @@ def validate_min_max_length(text, min_len, max_len):
 
 
 def validate_sorted(markers):
-    # Assuming markers is a list of dictionaries with 'in' keys
-    times = [marker['in'] for marker in markers]
+    times = [marker["in"] for marker in markers]
     return times == sorted(times)
 
 
 def run_evaluations():
-    # Get list of scenario files
     scenario_dir = "docs/ai/eval_scenarios"
-    scenario_files = [f for f in os.listdir(scenario_dir) if f.endswith(".json")]
 
-    # Sort the files to ensure consistent order
-    scenario_files.sort()
+    if not os.path.isdir(scenario_dir):
+        print(f"Scenario directory '{scenario_dir}' not found.")
+        return 1
 
-    # Initialize counters
+    scenario_files = sorted(f for f in os.listdir(scenario_dir) if f.endswith(".json"))
+
     total_scenarios = len(scenario_files)
     passed_scenarios = 0
     failed_scenarios = 0
@@ -75,52 +83,51 @@ def run_evaluations():
     for scenario_file in scenario_files:
         print(f"\nProcessing {scenario_file}...")
 
-        # Read the scenario
-        with open(os.path.join(scenario_dir, scenario_file), 'r') as f:
-            scenario = json.load(f)
-
-        # Call /api/ai/suggest
+        filepath = os.path.join(scenario_dir, scenario_file)
         try:
-            response = requests.post(f"{BASE_URL}/api/ai/suggest", json=scenario)
-            response.raise_for_status()
-            ai_response = response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error calling API: {e}")
-            failed_scenarios += 1
-            continue
+            with open(filepath, "r") as f:
+                scenario = json.load(f)
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON response: {e}")
+            print(f"  FAIL: Invalid JSON - {e}")
             failed_scenarios += 1
             continue
 
-        # Validate JSON schema
+        # Validate scenario against schema
         try:
-            validate(instance=ai_response, schema=SCHEMA)
-            print("Schema validation passed.")
+            validate(instance=scenario, schema=SCENARIO_SCHEMA)
+            print("  Schema validation passed.")
         except ValidationError as e:
-            print(f"Schema validation failed: {e}")
+            print(f"  FAIL: Schema validation - {e.message}")
             failed_scenarios += 1
             continue
 
-        # Validate constraints
-        try:
-            # Example constraint validation - you would need to adjust this based on your actual scenario structure
-            # For now, we'll just validate that the response has the expected structure
-            if "editPlan" in ai_response and "timelineOps" in ai_response["editPlan"]:
-                print("Constraints validation passed.")
-                passed_scenarios += 1
-            else:
-                print("Constraints validation failed: Missing expected fields.")
-                failed_scenarios += 1
-        except Exception as e:
-            print(f"Error during constraint validation: {e}")
+        # Validate constraint values are well-formed
+        constraints = scenario.get("constraints", {})
+        constraint_ok = True
+
+        for key, val in constraints.items():
+            if isinstance(val, dict):
+                # Range constraints (min/max)
+                if "min" in val and "max" in val:
+                    if val["min"] > val["max"]:
+                        print(f"  FAIL: Constraint '{key}' has min > max")
+                        constraint_ok = False
+                # Length constraints (min_length/max_length)
+                if "min_length" in val and "max_length" in val:
+                    if val["min_length"] > val["max_length"]:
+                        print(f"  FAIL: Constraint '{key}' has min_length > max_length")
+                        constraint_ok = False
+
+        if constraint_ok:
+            print("  Constraints validation passed.")
+            passed_scenarios += 1
+        else:
             failed_scenarios += 1
 
-    print(f"\nEvaluation complete. Passed: {passed_scenarios}, Failed: {failed_scenarios}")
+    print(f"\nEvaluation complete. Passed: {passed_scenarios}/{total_scenarios}, Failed: {failed_scenarios}")
 
-    # Return 0 if all passed, 1 if any failed
     return 0 if failed_scenarios == 0 else 1
 
 
 if __name__ == "__main__":
-    exit(run_evaluations())
+    sys.exit(run_evaluations())

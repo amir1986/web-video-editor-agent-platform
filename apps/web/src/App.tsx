@@ -100,7 +100,7 @@ export default function App() {
 
   const togglePlay = () => {
     if (!videoRef.current) return;
-    playing ? videoRef.current.pause() : videoRef.current.play();
+    if (playing) { videoRef.current.pause(); } else { videoRef.current.play(); }
     setPlaying(!playing);
   };
 
@@ -216,8 +216,8 @@ export default function App() {
             } else if (event.type === "error") {
               throw new Error(event.message || event.error);
             }
-          } catch (parseErr) {
-            try { data = JSON.parse(line); } catch {}
+          } catch (_parseErr) {
+            try { data = JSON.parse(line); } catch { /* non-JSON line, skip */ }
           }
         }
       }
@@ -226,7 +226,7 @@ export default function App() {
           const event = JSON.parse(buffer);
           if (event.type === "result") data = event;
           else if (!data) data = event;
-        } catch {}
+        } catch { /* ignore trailing non-JSON */ }
       }
 
       if (!data) throw new Error("No result received from server");
