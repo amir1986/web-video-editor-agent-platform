@@ -323,13 +323,16 @@ function runQualityGuardAgent(videoMeta, editPlan) {
 
   // ---- Check 4: No unnecessary re-encode ----
   const hasSoftTransitions = transitions.some(t => t.type !== "hard_cut");
-  // Stream copy is correct if there are ONLY hard_cut transitions.
-  // Re-encoding is acceptable ONLY when soft transitions require it.
+  // Stream copy is correct if there are ONLY hard_cut transitions AND the
+  // source codec is universally compatible (H.264 yuv420p). The renderer
+  // probes the source at render time and re-encodes if the codec is HEVC,
+  // VP9, AV1, or uses an unusual profile/pixel format. That re-encode is
+  // a NECESSARY compatibility step, not an unnecessary one.
   let noUnnecessaryReencode = true;
   if (!hasSoftTransitions && rc.force_reencode) {
     noUnnecessaryReencode = false;
     requiredFixes.push(
-      "force_reencode is set but all transitions are hard_cut — stream copy is sufficient, removing force_reencode"
+      "force_reencode is set but all transitions are hard_cut — stream copy is sufficient (unless codec is incompatible, which renderer handles), removing force_reencode"
     );
   }
 
@@ -350,20 +353,20 @@ function runQualityGuardAgent(videoMeta, editPlan) {
     fps_mode: "cfr",        // Constant frame rate to avoid stutter
   };
 
-  // If re-encoding required, verify no low-quality overrides exist
-  if (hasSoftTransitions) {
-    if (rc.crf && rc.crf > 23) {
-      exportSettingsOk = false;
-      requiredFixes.push(`CRF ${rc.crf} is too high (quality loss) — correcting to 18`);
-    }
-    if (rc.preset && ["ultrafast", "superfast", "veryfast"].includes(rc.preset)) {
-      exportSettingsOk = false;
-      requiredFixes.push(`Preset "${rc.preset}" causes visible quality degradation — correcting to "medium"`);
-    }
-    if (rc.max_bitrate && rc.max_bitrate < 5000) {
-      exportSettingsOk = false;
-      requiredFixes.push(`max_bitrate ${rc.max_bitrate}kbps is too low — removing cap`);
-    }
+  // Verify no low-quality overrides exist in render_constraints.
+  // These settings are used by the renderer when re-encoding is needed
+  // (soft transitions OR codec compatibility re-encode for HEVC/VP9/etc).
+  if (rc.crf && rc.crf > 23) {
+    exportSettingsOk = false;
+    requiredFixes.push(`CRF ${rc.crf} is too high (quality loss) — correcting to 18`);
+  }
+  if (rc.preset && ["ultrafast", "superfast", "veryfast"].includes(rc.preset)) {
+    exportSettingsOk = false;
+    requiredFixes.push(`Preset "${rc.preset}" causes visible quality degradation — correcting to "medium"`);
+  }
+  if (rc.max_bitrate && rc.max_bitrate < 5000) {
+    exportSettingsOk = false;
+    requiredFixes.push(`max_bitrate ${rc.max_bitrate}kbps is too low — removing cap`);
   }
 
   // ---- Check 6: Frame rate preservation ----
@@ -376,22 +379,22 @@ function runQualityGuardAgent(videoMeta, editPlan) {
   // ---- Build corrected render_constraints ----
   const constraintsOk = requiredFixes.length === 0;
 
+  // Always include encoding quality settings — the renderer may need them
+  // for codec compatibility re-encoding (e.g. HEVC→H.264) even when all
+  // transitions are hard_cut.
   const correctedRenderConstraints = {
     keep_resolution: true,
     keep_aspect_ratio: true,
     no_stretch: true,
     target_width: width,
     target_height: height,
-    // Quality encoding settings (used by renderer when re-encode is needed)
-    ...(hasSoftTransitions ? {
-      codec: qualitySettings.codec,
-      crf: qualitySettings.crf,
-      preset: qualitySettings.preset,
-      pixel_format: qualitySettings.pixel_format,
-      sar: qualitySettings.sar,
-      fps: fps,
-      fps_mode: qualitySettings.fps_mode,
-    } : {}),
+    codec: qualitySettings.codec,
+    crf: qualitySettings.crf,
+    preset: qualitySettings.preset,
+    pixel_format: qualitySettings.pixel_format,
+    sar: qualitySettings.sar,
+    fps: fps,
+    fps_mode: qualitySettings.fps_mode,
   };
 
   // Apply corrections

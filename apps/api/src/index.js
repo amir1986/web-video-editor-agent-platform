@@ -98,10 +98,54 @@ async function probeVideoMeta(wslIn, duration) {
 }
 
 /**
+ * Probe whether the source video codec is universally compatible with
+ * consumer players (Windows Movies & TV, QuickTime, mobile, etc.).
+ *
+ * Returns true when stream copy is safe. Returns false when re-encoding
+ * to H.264 yuv420p is required for the output to be playable everywhere.
+ */
+async function probeCanStreamCopy(wslIn) {
+  try {
+    const json = await ffprobe(
+      `-v error -select_streams v:0 -show_entries stream=codec_name,pix_fmt,profile -of json "${wslIn}"`
+    );
+    const data = JSON.parse(json);
+    const stream = data.streams?.[0] || {};
+    const codec = (stream.codec_name || "").toLowerCase();
+    const pixFmt = (stream.pix_fmt || "").toLowerCase();
+    const profile = (stream.profile || "").toLowerCase();
+
+    // Only H.264 with yuv420p (8-bit 4:2:0) is universally compatible.
+    // HEVC, VP9, AV1, and unusual H.264 profiles/pixel formats need re-encode.
+    if (codec !== "h264") {
+      console.log(`[COMPAT] Source codec "${codec}" is not H.264 — will re-encode`);
+      return false;
+    }
+    if (pixFmt && pixFmt !== "yuv420p") {
+      console.log(`[COMPAT] Source pixel format "${pixFmt}" is not yuv420p — will re-encode`);
+      return false;
+    }
+    // H.264 High 4:4:4 Predictive and similar non-standard profiles
+    if (profile.includes("4:4:4") || profile.includes("hi444")) {
+      console.log(`[COMPAT] Source H.264 profile "${profile}" is non-standard — will re-encode`);
+      return false;
+    }
+    console.log(`[COMPAT] Source is H.264/${pixFmt}/${profile} — stream copy is safe`);
+    return true;
+  } catch {
+    // If probing fails, re-encode to be safe
+    console.log("[COMPAT] Probe failed — will re-encode for safety");
+    return false;
+  }
+}
+
+/**
  * Render an EditPlan to a video file.
  *
- * Uses stream copy for hard_cut transitions (zero quality loss).
- * Requires re-encode only for segments with soft transitions (fade, dissolve, dip_to_black).
+ * Uses stream copy for hard_cut transitions when the source codec is universally
+ * compatible (H.264 yuv420p). Otherwise re-encodes to H.264 High Profile yuv420p
+ * to guarantee playback on all players (Windows, macOS, mobile).
+ *
  * When re-encoding for transitions, preserves original resolution exactly.
  */
 async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
@@ -117,6 +161,13 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   const qSar = rc.sar || "1:1";
   const qFpsMode = rc.fps_mode || "cfr";
 
+  // Check if source codec allows stream copy
+  const canCopy = await probeCanStreamCopy(wslIn);
+  // Re-encode args used when stream copy is not safe
+  const reencodeArgs = `-c:v ${qCodec} -crf ${qCrf} -preset ${qPreset} -pix_fmt ${qPixFmt} -movflags +faststart`;
+  const copyOrReencode = canCopy ? "-c copy" : reencodeArgs;
+  const copyLabel = canCopy ? "stream copy" : "re-encode (compat)";
+
   // Build a lookup of transitions by source segment id
   const transMap = {};
   for (const t of (editPlan.transitions || [])) {
@@ -125,27 +176,28 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
 
   const needsReencode = (editPlan.transitions || []).some(t => t.type !== "hard_cut");
 
-  // Single segment, no soft transitions — stream copy
+  // Single segment, no soft transitions
   if (segments.length === 1 && !needsReencode) {
     const seg = segments[0];
-    console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
-    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${wslOut}"`);
+    console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
+    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} ${copyOrReencode} -avoid_negative_ts make_zero "${wslOut}"`);
     return;
   }
 
-  // All hard cuts — stream copy concat (fast, lossless)
+  // All hard cuts — concat
   if (!needsReencode) {
     const segFiles = [];
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-      console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (stream copy)`);
-      await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+      console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
+      await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} ${copyOrReencode} -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
       segFiles.push(segPath);
     }
     const concatFile = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+    // After re-encoding individual segments, concat can always stream copy
+    await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
     for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
     return;
   }
@@ -242,12 +294,12 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
         fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+        await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
       }
     } else {
       const concatFile = path.join(tmpDir, "concat.txt");
       fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-      await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy "${wslOut}"`);
+      await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
     }
   } finally {
     for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
@@ -288,9 +340,13 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   try {
     fs.writeFileSync(tmpIn, req.body);
-    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s`);
-    // Stream copy: no re-encoding, preserves original quality/resolution/rotation/aspect ratio
-    await ffmpeg(`-y -loglevel error -ss ${inSec} -i "${toWslPath(tmpIn)}" -t ${outSec - inSec} -c copy -avoid_negative_ts make_zero "${toWslPath(tmpOut)}"`);
+    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    const canCopy = await probeCanStreamCopy(wslIn);
+    const codecArgs = canCopy
+      ? "-c copy"
+      : "-c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -movflags +faststart";
+    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode"})`);
+    await ffmpeg(`-y -loglevel error -ss ${inSec} -i "${wslIn}" -t ${outSec - inSec} ${codecArgs} -avoid_negative_ts make_zero "${wslOut}"`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
