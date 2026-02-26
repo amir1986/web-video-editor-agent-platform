@@ -8,7 +8,7 @@
   const original = video.currentTime;
 
   for (let i = 0; i < count; i++) {
-    const t = (duration / (count - 1)) * i;
+    const t = count <= 1 ? 0 : (duration / (count - 1)) * i;
     await new Promise<void>((resolve) => {
       video.currentTime = t;
       video.onseeked = () => {

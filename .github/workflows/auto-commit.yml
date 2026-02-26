@@ -1,0 +1,39 @@
+name: AI Auto Commit Workflow
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  auto-task:
+    if: contains(github.event.comment.body, '/ai-run')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install anthropic
+
+      - name: Run AI Task
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TASK_INSTRUCTION: ${{ github.event.comment.body }}
+        run: python .github/scripts/run_task.py
+
+      - name: Commit and push changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet || git commit -m 'AI automated task'
+          git push

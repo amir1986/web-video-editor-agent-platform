@@ -1,4 +1,11 @@
-﻿
 trajectories/
 
 node_modules/
+dist/
+
+.env
+.env.*
+.env.local
+issues/
+*.pem
+*.key
