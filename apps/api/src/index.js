@@ -1,17 +1,18 @@
 ﻿const express = require("express");
 const cors = require("cors");
-const { exec } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
+const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu";
+
 const app = express();
-app.use(cors());
+app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
 app.use(express.json({ limit: "10mb" }));
 
 function toWslPath(p) {
-  // On Linux, paths don't need conversion
   if (process.platform === "win32") {
     return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
   }
@@ -23,22 +24,12 @@ function tmpFile(ext) {
 function cleanup(...files) {
   for (const f of files) try { fs.unlinkSync(f); } catch {}
 }
-function ffmpegCmd(args) {
-  // On Windows use WSL, on Linux/Mac call ffmpeg directly
-  if (process.platform === "win32") {
-    return `wsl -d Ubuntu-24.04 -- ffmpeg ${args}`;
-  }
-  return `ffmpeg ${args}`;
-}
-function ffprobeCmd(args) {
-  if (process.platform === "win32") {
-    return `wsl -d Ubuntu-24.04 -- ffprobe ${args}`;
-  }
-  return `ffprobe ${args}`;
-}
 function ffmpeg(args) {
   return new Promise((resolve, reject) => {
-    exec(ffmpegCmd(args), { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
+    const [cmd, fullArgs] = process.platform === "win32"
+      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffmpeg", ...args]]
+      : ["ffmpeg", args];
+    execFile(cmd, fullArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve();
     });
@@ -46,7 +37,10 @@ function ffmpeg(args) {
 }
 function ffprobe(args) {
   return new Promise((resolve, reject) => {
-    exec(ffprobeCmd(args), (err, stdout, stderr) => {
+    const [cmd, fullArgs] = process.platform === "win32"
+      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffprobe", ...args]]
+      : ["ffprobe", args];
+    execFile(cmd, fullArgs, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
@@ -62,7 +56,7 @@ async function extractFrames(wslIn, duration, count) {
   try {
     // scale=320:-2 preserves original aspect ratio (height auto-calculated, divisible by 2)
     // -loglevel error suppresses the version banner so errors are readable
-    await ffmpeg(`-loglevel error -i "${wslIn}" -vf "fps=1/${interval},scale=320:-2" -frames:v ${count} "${toWslPath(framesDir)}/frame%04d.jpg"`);
+    await ffmpeg(["-loglevel", "error", "-i", wslIn, "-vf", `fps=1/${interval},scale=320:-2`, "-frames:v", String(count), `${toWslPath(framesDir)}/frame%04d.jpg`]);
     const frames = fs.readdirSync(framesDir)
       .filter(f => f.endsWith(".jpg")).sort()
       .map((f, i) => ({
@@ -83,7 +77,7 @@ const { runEditPipeline } = require("./ai/agents");
  */
 async function probeVideoMeta(wslIn, duration) {
   try {
-    const json = await ffprobe(`-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of json "${wslIn}"`);
+    const json = await ffprobe(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "json", wslIn]);
     const data = JSON.parse(json);
     const stream = data.streams?.[0] || {};
     let fps = 30;
@@ -106,9 +100,7 @@ async function probeVideoMeta(wslIn, duration) {
  */
 async function probeCanStreamCopy(wslIn) {
   try {
-    const json = await ffprobe(
-      `-v error -select_streams v:0 -show_entries stream=codec_name,pix_fmt,profile -of json "${wslIn}"`
-    );
+    const json = await ffprobe(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt,profile", "-of", "json", wslIn]);
     const data = JSON.parse(json);
     const stream = data.streams?.[0] || {};
     const codec = (stream.codec_name || "").toLowerCase();
@@ -152,10 +144,19 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   const segments = editPlan.segments || [];
   if (!segments.length) throw new Error("EditPlan has no segments");
 
+  // Validate segment boundaries
+  for (const seg of segments) {
+    if (typeof seg.src_in !== "number" || typeof seg.src_out !== "number" ||
+        !isFinite(seg.src_in) || !isFinite(seg.src_out) ||
+        seg.src_in < 0 || seg.src_out <= seg.src_in) {
+      throw new Error("Invalid segment boundaries");
+    }
+  }
+
   // Quality Guard render settings — use quality_guard-approved constraints
   const rc = editPlan.render_constraints || {};
   const qCodec = rc.codec || "libx264";
-  const qCrf = rc.crf || 18;
+  const qCrf = String(rc.crf || 18);
   const qPreset = rc.preset || "medium";
   const qPixFmt = rc.pixel_format || "yuv420p";
   const qSar = rc.sar || "1:1";
@@ -163,9 +164,8 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
 
   // Check if source codec allows stream copy
   const canCopy = await probeCanStreamCopy(wslIn);
-  // Re-encode args used when stream copy is not safe
-  const reencodeArgs = `-c:v ${qCodec} -crf ${qCrf} -preset ${qPreset} -pix_fmt ${qPixFmt} -movflags +faststart`;
-  const copyOrReencode = canCopy ? "-c copy" : reencodeArgs;
+  const reencodeArgs = ["-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-movflags", "+faststart"];
+  const copyOrReencode = canCopy ? ["-c", "copy"] : reencodeArgs;
   const copyLabel = canCopy ? "stream copy" : "re-encode (compat)";
 
   // Build a lookup of transitions by source segment id
@@ -180,7 +180,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
   if (segments.length === 1 && !needsReencode) {
     const seg = segments[0];
     console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
-    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} ${copyOrReencode} -avoid_negative_ts make_zero "${wslOut}"`);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...copyOrReencode, "-avoid_negative_ts", "make_zero", wslOut]);
     return;
   }
 
@@ -191,13 +191,12 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
       const seg = segments[i];
       const segPath = path.join(tmpDir, `seg_${i}.mp4`);
       console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
-      await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} ${copyOrReencode} -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+      await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...copyOrReencode, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
       segFiles.push(segPath);
     }
     const concatFile = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    // After re-encoding individual segments, concat can always stream copy
-    await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
+    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
     for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
     return;
   }
@@ -213,19 +212,19 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
     console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s`);
-    await ffmpeg(`-y -loglevel error -ss ${seg.src_in} -i "${wslIn}" -t ${seg.src_out - seg.src_in} -c copy -avoid_negative_ts make_zero "${toWslPath(segPath)}"`);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), "-c", "copy", "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
     segFiles.push(segPath);
   }
 
   // Probe whether the first segment has audio
   let hasAudio = false;
   try {
-    const audioProbe = await ffprobe(`-v error -select_streams a -show_entries stream=index -of csv=p=0 "${toWslPath(segFiles[0])}"`);
+    const audioProbe = await ffprobe(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", toWslPath(segFiles[0])]);
     hasAudio = audioProbe.trim().length > 0;
   } catch { hasAudio = false; }
 
-  // Build inputs
-  const inputs = segFiles.map(f => `-i "${toWslPath(f)}"`).join(" ");
+  // Build input args as array for execFile
+  const inputArgs = segFiles.flatMap(f => ["-i", toWslPath(f)]);
 
   // Map transition type to xfade name
   const xfadeType = (type) => {
@@ -276,30 +275,26 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir) {
     if (filterParts.length > 0) {
       const allFilters = hasAudio ? [...filterParts, ...audioParts] : filterParts;
       const filterComplex = allFilters.join(";");
-      const mapArgs = hasAudio
-        ? `-map "${lastVideoLabel}" -map "${lastAudioLabel}"`
-        : `-map "${lastVideoLabel}"`;
-      const audioArgs = hasAudio ? "-c:a aac -b:a 192k" : "-an";
+      const audioArgs = hasAudio ? ["-c:a", "aac", "-b:a", "192k"] : ["-an"];
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
       console.log(`[RENDER] Quality settings: ${qCodec} crf=${qCrf} preset=${qPreset} pix_fmt=${qPixFmt} sar=${qSar}`);
       try {
         const sarFilter = `${lastVideoLabel}setsar=${qSar}[vout]`;
         const fullFilterComplex = `${filterComplex};${sarFilter}`;
         const finalMapArgs = hasAudio
-          ? `-map "[vout]" -map "${lastAudioLabel}"`
-          : `-map "[vout]"`;
-        await ffmpeg(`-y -loglevel error ${inputs} -filter_complex "${fullFilterComplex}" ${finalMapArgs} -c:v ${qCodec} -crf ${qCrf} -preset ${qPreset} -pix_fmt ${qPixFmt} -fps_mode ${qFpsMode} ${audioArgs} -movflags +faststart "${wslOut}"`);
+          ? ["-map", "[vout]", "-map", lastAudioLabel]
+          : ["-map", "[vout]"];
+        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", fullFilterComplex, ...finalMapArgs, "-c:v", qCodec, "-crf", qCrf, "-preset", qPreset, "-pix_fmt", qPixFmt, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
       } catch (filterErr) {
-        // If filter_complex fails, fall back to simple concat
         console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
         fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
+        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
       }
     } else {
       const concatFile = path.join(tmpDir, "concat.txt");
       fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-      await ffmpeg(`-y -loglevel error -f concat -safe 0 -i "${toWslPath(concatFile)}" -c copy -movflags +faststart "${wslOut}"`);
+      await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
     }
   } finally {
     for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
@@ -325,7 +320,8 @@ app.post("/api/analyze", async (req, res) => {
       summary: `${editPlan.segments.length} highlights selected`,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[ANALYZE ERROR]", err);
+    res.status(500).json({ error: "Analysis failed" });
   }
 });
 
@@ -335,7 +331,8 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
   const name   = req.query.name || "highlight";
-  if (isNaN(inSec) || isNaN(outSec)) return res.status(400).json({ error: "in/out must be valid numbers" });
+  if (isNaN(inSec) || isNaN(outSec) || !isFinite(inSec) || !isFinite(outSec)) return res.status(400).json({ error: "in/out must be valid finite numbers" });
+  if (inSec < 0 || outSec < 0) return res.status(400).json({ error: "in/out must be non-negative" });
   if (outSec <= inSec) return res.status(400).json({ error: "out must be > in" });
   const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   try {
@@ -343,16 +340,17 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
     const canCopy = await probeCanStreamCopy(wslIn);
     const codecArgs = canCopy
-      ? "-c copy"
-      : "-c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -movflags +faststart";
+      ? ["-c", "copy"]
+      : ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
     console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode"})`);
-    await ffmpeg(`-y -loglevel error -ss ${inSec} -i "${wslIn}" -t ${outSec - inSec} ${codecArgs} -avoid_negative_ts make_zero "${wslOut}"`);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(inSec), "-i", wslIn, "-t", String(outSec - inSec), ...codecArgs, "-avoid_negative_ts", "make_zero", wslOut]);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
   } catch (err) {
     cleanup(tmpIn, tmpOut);
-    res.status(500).json({ error: err.message });
+    console.error("[TRIM ERROR]", err);
+    res.status(500).json({ error: "Trim failed" });
   }
 });
 
@@ -368,7 +366,7 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
     // Probe video metadata
-    const durationStr = await ffprobe(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
+    const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
     const duration = parseFloat(durationStr);
     if (isNaN(duration) || duration <= 0) {
       cleanup(tmpIn, tmpOut);
@@ -400,12 +398,12 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
     res.set("X-AI-Summary", summary);
     res.set("X-Segments-Count", String(segments.length));
-    res.set("X-Edit-Plan", JSON.stringify(editPlan));
     res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
   } catch (err) {
     cleanup(tmpIn, tmpOut);
     try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-    res.status(500).json({ error: err.message });
+    console.error("[AUTO-EDIT ERROR]", err);
+    res.status(500).json({ error: "Auto-edit failed" });
   }
 });
 

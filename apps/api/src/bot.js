@@ -1,11 +1,13 @@
 const TelegramBot = require("node-telegram-bot-api");
 const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
-const { exec } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+
+const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -32,11 +34,11 @@ function toWslPath(p) {
 }
 
 function ffmpegExec(args) {
-  const cmd = process.platform === "win32"
-    ? `wsl -d Ubuntu-24.04 -- ffmpeg ${args}`
-    : `ffmpeg ${args}`;
   return new Promise((resolve, reject) => {
-    exec(cmd, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const [cmd, fullArgs] = process.platform === "win32"
+      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffmpeg", ...args]]
+      : ["ffmpeg", args];
+    execFile(cmd, fullArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout);
     });
@@ -44,11 +46,11 @@ function ffmpegExec(args) {
 }
 
 function ffprobeExec(args) {
-  const cmd = process.platform === "win32"
-    ? `wsl -d Ubuntu-24.04 -- ffprobe ${args}`
-    : `ffprobe ${args}`;
   return new Promise((resolve, reject) => {
-    exec(cmd, (err, stdout, stderr) => {
+    const [cmd, fullArgs] = process.platform === "win32"
+      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffprobe", ...args]]
+      : ["ffprobe", args];
+    execFile(cmd, fullArgs, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout.trim());
     });
@@ -64,7 +66,7 @@ async function compressForTelegram(inputPath, outputPath, maxBytes) {
   const wslIn = toWslPath(inputPath);
   const wslOut = toWslPath(outputPath);
 
-  const durationStr = await ffprobeExec(`-v error -show_entries format=duration -of csv=p=0 "${wslIn}"`);
+  const durationStr = await ffprobeExec(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
   const duration = parseFloat(durationStr);
   if (!duration || duration <= 0) {
     throw new Error("Could not determine video duration for compression");
@@ -87,8 +89,7 @@ async function compressForTelegram(inputPath, outputPath, maxBytes) {
   // -map_metadata 0: preserve all metadata (rotation, etc.)
   // -movflags +faststart: optimize for streaming
   // No scale filter: preserves original resolution and aspect ratio exactly
-  const encArgs = `-c:v libx264 -b:v ${vbr} -maxrate ${vbr} -bufsize ${bufsize} -c:a aac -b:a 128k -preset medium -map_metadata 0 -movflags +faststart`;
-  await ffmpegExec(`-y -i "${wslIn}" ${encArgs} "${wslOut}"`);
+  await ffmpegExec(["-y", "-i", wslIn, "-c:v", "libx264", "-b:v", vbr, "-maxrate", vbr, "-bufsize", bufsize, "-c:a", "aac", "-b:a", "128k", "-preset", "medium", "-map_metadata", "0", "-movflags", "+faststart", wslOut]);
 
   // Check if output fits; if still too large, retry with proportionally lower bitrate
   const outSize = fs.statSync(outputPath).size;
@@ -99,8 +100,7 @@ async function compressForTelegram(inputPath, outputPath, maxBytes) {
     const adjustedVbr = Math.floor((videoBitrate * ratio) / 1000) + "k";
     const adjustedBuf = Math.floor((videoBitrate * ratio * 2) / 1000) + "k";
     console.log(`[COMPRESS] Still too large, retrying with vbr=${adjustedVbr}`);
-    const retryArgs = `-c:v libx264 -b:v ${adjustedVbr} -maxrate ${adjustedVbr} -bufsize ${adjustedBuf} -c:a aac -b:a 128k -preset medium -map_metadata 0 -movflags +faststart`;
-    await ffmpegExec(`-y -i "${wslIn}" ${retryArgs} "${wslOut}"`);
+    await ffmpegExec(["-y", "-i", wslIn, "-c:v", "libx264", "-b:v", adjustedVbr, "-maxrate", adjustedVbr, "-bufsize", adjustedBuf, "-c:a", "aac", "-b:a", "128k", "-preset", "medium", "-map_metadata", "0", "-movflags", "+faststart", wslOut]);
     const finalSize = fs.statSync(outputPath).size;
     console.log(`[COMPRESS] Second pass output: ${(finalSize / 1024 / 1024).toFixed(1)}MB`);
   }
