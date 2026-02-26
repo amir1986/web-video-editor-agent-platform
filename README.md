@@ -1,243 +1,206 @@
 # Web Video Editor Agent Platform
 
-A local-first web video editor that uses a multi-agent AI pipeline to automatically generate highlight reels from raw video. Runs entirely on localhost with no paid APIs — AI inference goes through a local [Ollama](https://ollama.com) instance.
+An open-source, local-first web video editor powered by a multi-agent AI pipeline. Send a video and get an automatically edited result — via the web UI, REST API, or Telegram bot.
+
+The AI pipeline uses local LLMs (Ollama) to analyze video frames and produce an **EditPlan** JSON that drives ffmpeg for rendering. No paid APIs, no cloud uploads — everything runs on your machine.
 
 ## Features
 
-- **Browser-based editor** — Import video, preview with playback controls, set In/Out markers, export trimmed clips
-- **Multi-agent AI pipeline** — Six specialized agents collaborate to produce highlight edits:
-  1. **Cut Agent** — Selects the strongest segments using vision-capable LLM
-  2. **Structure Agent** — Reorders segments for narrative arc (hook → buildup → climax → resolution)
-  3. **Continuity Agent** — Smooths jarring cuts and adjusts segment boundaries
-  4. **Transition Agent** — Assigns transition types (hard cut, fade, dissolve, dip to black)
-  5. **Constraints Agent** — Validates the edit plan against duration, resolution, and overlap rules
-  6. **Quality Guard Agent** — Audits encoding settings, auto-corrects quality regressions
-- **One-click highlight export** — AI analyzes frames, builds an edit plan, renders with ffmpeg transitions, and downloads automatically
-- **Telegram bot** — Send a video to the bot and get back a highlight reel (supports files >20MB via MTProto)
-- **Codec compatibility** — Automatically detects and re-encodes HEVC/VP9/AV1 sources to universally playable H.264
-- **Local persistence** — Project state saved to IndexedDB in the browser
+- **Web UI** — Import video, preview, trim with In/Out markers, export via ffmpeg.wasm
+- **Auto-Edit API** — Upload a video, get back an AI-edited version (cuts, transitions, quality-matched output)
+- **Telegram Bot** — Send a video to your bot, receive the edited result
+- **Multi-Agent Pipeline** — Cut → Structure → Continuity → Transition → Constraints → Quality Guard
+- **Source Quality Matching** — Probes the original video and encodes output at the same bitrate, resolution, and fps
+- **Auto-Restart Dev Mode** — All services use `--watch` for instant reload on file changes
 
 ## Architecture
 
 ```
-web-video-editor-agent-platform/
-├── apps/
-│   ├── web/                # React + TypeScript + Vite frontend
-│   │   └── src/
-│   │       ├── App.tsx             # Main editor UI
-│   │       ├── export.ts           # Export functions (trim + edit plan)
-│   │       ├── frameExtractor.ts   # Frame extraction for AI analysis
-│   │       └── utils/indexedDB.ts  # Project persistence
-│   └── api/                # Node.js/Express API server
-│       └── src/
-│           ├── index.js            # REST API + ffmpeg rendering
-│           ├── bot.js              # Telegram bot
-│           └── ai/
-│               ├── agents.js                # Multi-agent pipeline
-│               └── editplan.v1.schema.json  # EditPlan JSON schema
-└── packages/
-    └── core/               # Shared TypeScript types (ProjectState, Clip, etc.)
+apps/web          React + TypeScript + Vite (browser UI)
+apps/api          Express.js API gateway + ffmpeg orchestration
+  src/index.js      API server (trim, auto-edit, analyze endpoints)
+  src/bot.js        Telegram bot (polling mode)
+  src/ai/agents.js  Multi-agent LLM pipeline
+packages/core     Shared TypeScript types and timeline operations
 ```
 
-### How it works
+## Prerequisites
 
-1. **Web UI** — The React frontend captures frames from the imported video and sends them to the API server for AI analysis. The user can also manually set In/Out markers for single-segment trimming.
+| Dependency | Version | Purpose |
+|---|---|---|
+| **Node.js** | >= 18 | Runtime (`--watch` requires 18+) |
+| **npm** | >= 8 | Package manager (workspaces support) |
+| **ffmpeg** | any recent | Video processing |
+| **ffprobe** | any recent | Video analysis (ships with ffmpeg) |
+| **Ollama** | any recent | Local LLM inference for auto-edit |
 
-2. **API Server** — Receives frames, runs the multi-agent pipeline through Ollama, produces an EditPlan (JSON describing segments + transitions), then renders the final video using ffmpeg.
+### Platform-Specific Setup
 
-3. **Telegram Bot** — Accepts video messages, downloads them (Bot API for ≤20MB, MTProto for larger files), sends to the auto-edit API, compresses if the output exceeds Telegram's 50MB upload limit, and sends back the result.
+#### Linux / macOS
 
-## Getting Started
-
-### Prerequisites
-
-- **Node.js** >= 18
-- **ffmpeg** and **ffprobe** installed and available on PATH
-- **Ollama** running locally with a vision model (default: `qwen2.5vl:7b`)
-
-### Install and Run
+Install ffmpeg from your package manager:
 
 ```bash
-# Install dependencies
+# Ubuntu / Debian
+sudo apt update && sudo apt install ffmpeg
+
+# macOS (Homebrew)
+brew install ffmpeg
+```
+
+Install Ollama: https://ollama.com/download
+
+#### Windows (WSL)
+
+This project runs ffmpeg/ffprobe through WSL on Windows. You need:
+
+1. **WSL 2** with a Linux distro installed (default: `Ubuntu-24.04`)
+2. **ffmpeg** installed inside your WSL distro:
+   ```bash
+   wsl -d Ubuntu-24.04 -- sudo apt update
+   wsl -d Ubuntu-24.04 -- sudo apt install ffmpeg
+   ```
+3. If your distro has a different name, set the `WSL_DISTRO` environment variable (see below)
+
+## Installation
+
+```bash
+git clone https://github.com/amir1986/web-video-editor-agent-platform.git
+cd web-video-editor-agent-platform
 npm install
-
-# Pull the default vision model
-ollama pull qwen2.5vl:7b
-
-# Start the API server (port 3001)
-npm run dev --workspace=apps/api
-
-# In another terminal, start the web UI (port 5173)
-npm run dev --workspace=apps/web
 ```
-
-Open http://localhost:5173, import a video, and click **Auto Edit with Vision**.
-
-### Windows (WSL)
-
-On Windows, ffmpeg/ffprobe are invoked through WSL. Set the `WSL_DISTRO` environment variable to match your installed distribution:
-
-```bash
-set WSL_DISTRO=Ubuntu-24.04
-```
-
-The default is `Ubuntu`. Make sure ffmpeg is installed inside your WSL distro (`sudo apt install ffmpeg`).
-
-## AI Pipeline
-
-The multi-agent pipeline processes video in six stages. Only the first three use LLM inference; the rest are deterministic.
-
-| Stage | Agent | Uses LLM | Purpose |
-|-------|-------|----------|---------|
-| 1 | **Cut** | Vision | Selects 2–6 strongest segments (30–60% of original) |
-| 2 | **Structure** | Text | Reorders for narrative arc, merges close segments, splits long ones |
-| 3 | **Continuity** | Text | Adjusts boundaries ±0.5s for flow, flags soft transitions |
-| 4 | **Transition** | No | Assigns `hard_cut`, `fade`, `dissolve`, or `dip_to_black` |
-| 5 | **Constraints** | No | Validates boundaries, removes overlaps, clamps to [0, duration] |
-| 6 | **Quality Guard** | No | Audits encoding settings (CRF, preset, resolution), auto-corrects regressions |
-
-**Fallback**: If AI inference fails, a deterministic time-based segmentation is used (keeps 2–4 segments covering the strongest portions).
-
-### EditPlan Format
-
-The pipeline outputs an EditPlan JSON document:
-
-```json
-{
-  "render_constraints": {
-    "keep_resolution": true,
-    "keep_aspect_ratio": true,
-    "no_stretch": true,
-    "target_width": 1920,
-    "target_height": 1080,
-    "codec": "libx264",
-    "crf": 18,
-    "preset": "medium",
-    "pixel_format": "yuv420p",
-    "fps": 30,
-    "fps_mode": "cfr"
-  },
-  "segments": [
-    { "id": "s1", "src_in": 2.5, "src_out": 10.0 },
-    { "id": "s2", "src_in": 25.0, "src_out": 38.5 }
-  ],
-  "transitions": [
-    { "from": "s1", "to": "s2", "type": "hard_cut" }
-  ],
-  "quality_guard": {
-    "constraints_ok": true,
-    "checks": {
-      "resolution_unchanged": true,
-      "aspect_ratio_unchanged": true,
-      "no_stretch": true,
-      "no_unnecessary_reencode": true,
-      "export_settings_not_platform_default": true,
-      "fps_preserved": true,
-      "sar_dar_correct": true
-    }
-  }
-}
-```
-
-Full schema: [`apps/api/src/ai/editplan.v1.schema.json`](apps/api/src/ai/editplan.v1.schema.json)
-
-## API Reference
-
-Base URL: `http://localhost:3001`
-
-### `POST /api/analyze`
-
-Runs the multi-agent pipeline on extracted frames. Used by the web UI.
-
-**Request body** (JSON):
-```json
-{
-  "duration": 120.5,
-  "frames": ["data:image/jpeg;base64,...", "..."],
-  "width": 1920,
-  "height": 1080,
-  "fps": 30
-}
-```
-
-**Response** (JSON):
-```json
-{
-  "editPlan": { "segments": [...], "transitions": [...], ... },
-  "segments": [...],
-  "summary": "3 highlights selected"
-}
-```
-
-### `POST /api/trim`
-
-Trims a single segment from the uploaded video.
-
-**Query params**: `in` (seconds), `out` (seconds), `name` (filename)
-
-**Request body**: Raw video binary (`Content-Type: video/mp4`)
-
-**Response**: MP4 file download. Uses stream copy for H.264 yuv420p sources, re-encodes otherwise.
-
-### `POST /api/auto-edit`
-
-Full highlight reel: probes video, extracts frames, runs AI pipeline, renders EditPlan.
-
-**Query params**: `name` (filename)
-
-**Request body**: Raw video binary (`Content-Type: video/mp4`)
-
-**Response**: MP4 file download with headers `X-AI-Summary` and `X-Segments-Count`.
-
-### `GET /api/health`
-
-Returns `{ "status": "ok" }`.
-
-## Telegram Bot
-
-The bot lets users send a video and receive a highlight reel directly in Telegram.
-
-```bash
-# Required
-export TELEGRAM_BOT_TOKEN="your-bot-token"
-
-# Optional — enables large file downloads (>20MB) via MTProto
-export TELEGRAM_API_ID="your-api-id"
-export TELEGRAM_API_HASH="your-api-hash"
-
-# Start the bot (API server must be running)
-npm run bot --workspace=apps/api
-```
-
-Get `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org.
-
-The bot accepts videos sent as messages or documents. If the output exceeds Telegram's 50MB upload limit, it is automatically compressed with a calculated bitrate to fit.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VISION_MODEL` | `qwen2.5vl:7b` | Ollama model for vision-capable agents (Cut Agent) |
-| `TEXT_MODEL` | same as `VISION_MODEL` | Ollama model for text-only agents (Structure, Continuity) |
-| `VITE_API_URL` | `http://localhost:3001` | API server URL (frontend, set in `.env`) |
-| `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin for the API server |
-| `WSL_DISTRO` | `Ubuntu` | WSL distribution name (Windows only) |
-| `API_URL` | `http://localhost:3001` | API server URL (used by bot) |
-| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token (required for bot) |
-| `TELEGRAM_API_ID` | — | Telegram API ID for MTProto (optional) |
-| `TELEGRAM_API_HASH` | — | Telegram API hash for MTProto (optional) |
+Create a `.env` file in `apps/api/` (it is git-ignored):
 
-## Tech Stack
+```bash
+# --- Required for Telegram Bot only ---
+TELEGRAM_BOT_TOKEN=your-bot-token-from-@BotFather
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | React 18, TypeScript, Vite |
-| Backend | Node.js, Express |
-| Video processing | ffmpeg/ffprobe (CLI), ffmpeg.wasm (browser) |
-| AI inference | Ollama (local, OpenAI-compatible API) |
-| Telegram | node-telegram-bot-api, gramjs (MTProto) |
-| Persistence | IndexedDB (browser) |
+# --- Optional ---
+# WSL distro name (Windows only, default: Ubuntu-24.04)
+WSL_DISTRO=Ubuntu-24.04
+
+# CORS origin for the web UI (default: http://localhost:5173)
+CORS_ORIGIN=http://localhost:5173
+
+# Telegram Bot internal API URL (default: http://localhost:3001)
+API_URL=http://localhost:3001
+
+# Telegram MTProto credentials (for large file downloads >20MB)
+TELEGRAM_API_ID=12345678
+TELEGRAM_API_HASH=your-api-hash
+
+# Ollama model names (default: qwen2.5vl:7b)
+VISION_MODEL=qwen2.5vl:7b
+TEXT_MODEL=qwen2.5vl:7b
+```
+
+## Running
+
+### Start Everything (Recommended)
+
+From the project root, one command starts all three services with auto-restart:
+
+```bash
+npm run dev
+```
+
+This runs concurrently with labeled, colored output:
+- `[api]` — API server on http://localhost:3001 (auto-restarts on file changes)
+- `[bot]` — Telegram bot (auto-restarts on file changes)
+- `[web]` — Vite dev server on http://localhost:5173 (HMR)
+
+### Start Services Individually
+
+```bash
+# API server only (with auto-restart)
+npm run dev:api
+
+# Telegram bot only (with auto-restart)
+npm run dev:bot
+
+# Web UI only (with HMR)
+npm run dev:web
+```
+
+### Production
+
+```bash
+# API server
+cd apps/api && node src/index.js
+
+# Telegram bot
+cd apps/api && node src/bot.js
+
+# Web UI (build and serve)
+cd apps/web && npm run build
+# Serve the dist/ folder with any static file server
+```
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/analyze` | Analyze a video file — returns duration, resolution, fps, codec info |
+| `POST` | `/api/trim` | Trim a video by time range — send raw video bytes with query params `in` and `out` |
+| `POST` | `/api/auto-edit` | AI-powered auto-edit — analyzes frames, runs multi-agent pipeline, renders result |
+| `GET` | `/api/health` | Health check |
+
+### Trim Example
+
+```bash
+curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
+  --data-binary @input.mp4 \
+  -H "Content-Type: video/mp4" \
+  --output trimmed.mp4
+```
+
+### Auto-Edit Example
+
+```bash
+curl -X POST "http://localhost:3001/api/auto-edit" \
+  --data-binary @input.mp4 \
+  -H "Content-Type: video/mp4" \
+  --output edited.mp4
+```
+
+## Telegram Bot Usage
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and get the token
+2. Set `TELEGRAM_BOT_TOKEN` in your `.env` file
+3. Start the bot: `npm run dev:bot`
+4. Send any video to your bot — it will auto-edit and reply with the result
+
+For videos larger than 20MB, you also need `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org.
+
+## Ollama Setup
+
+The auto-edit pipeline requires a local LLM. Install and pull a vision model:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the default vision model
+ollama pull qwen2.5vl:7b
+```
+
+Ollama must be running on `http://localhost:11434` (the default).
+
+## Project Scripts
+
+| Script | Scope | Description |
+|---|---|---|
+| `npm run dev` | Root | Start API + Bot + Web concurrently with auto-restart |
+| `npm run dev:api` | Root | Start API server with `--watch` |
+| `npm run dev:bot` | Root | Start Telegram bot with `--watch` |
+| `npm run dev:web` | Root | Start Vite dev server |
+| `npm run build` | Root | Build the web UI for production |
+| `npm run lint` | Root | Lint the web UI |
+| `npm run typecheck` | Root | Type-check the web UI |
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT — see [LICENSE](LICENSE).
