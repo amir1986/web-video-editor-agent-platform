@@ -206,6 +206,8 @@ bot.on("video", async (msg) => {
   try {
     // Download video from Telegram (auto-selects Bot API or MTProto based on size)
     await downloadTelegramFile(video.file_id, video.file_size, chatId, msg.message_id, tmpIn);
+    const inputSize = fs.statSync(tmpIn).size;
+    console.log(`[VIDEO] Downloaded: ${(inputSize / 1024 / 1024).toFixed(1)}MB → ${tmpIn}`);
 
     await bot.editMessageText("Processing with AI... this may take a minute.", {
       chat_id: chatId,
@@ -216,17 +218,19 @@ bot.on("video", async (msg) => {
     const videoBuffer = fs.readFileSync(tmpIn);
     const name = msg.video.file_name?.replace(/\.[^/.]+$/, "") || "video";
 
-    console.log(`[DEBUG] Sending to API: ${API_URL}/api/auto-edit, video size: ${videoBuffer.length} bytes`);
+    console.log(`[VIDEO] Sending to API: ${API_URL}/api/auto-edit, size=${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB`);
+    const apiStart = Date.now();
     const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
     });
 
-    console.log(`[DEBUG] API response status: ${res.status}`);
+    const apiElapsed = ((Date.now() - apiStart) / 1000).toFixed(1);
+    console.log(`[VIDEO] API response: status=${res.status} in ${apiElapsed}s`);
     if (!res.ok) {
       const err = await res.text();
-      console.log(`[DEBUG] API error body: ${err}`);
+      console.log(`[VIDEO] API error body: ${err}`);
       throw new Error(`API error ${res.status}: ${err}`);
     }
 
@@ -241,19 +245,24 @@ bot.on("video", async (msg) => {
     let fileToSend = tmpOut;
     let compressed = false;
     const outSize = fs.statSync(tmpOut).size;
+    console.log(`[VIDEO] API output: ${(outSize / 1024 / 1024).toFixed(1)}MB, segments=${segCount}, input was ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
 
     if (outSize > MAX_UPLOAD_SIZE) {
       const outMB = (outSize / (1024 * 1024)).toFixed(1);
-      console.log(`[VIDEO] Output ${outMB}MB > 50MB, compressing for Telegram...`);
+      console.log(`[VIDEO] Output ${outMB}MB > 50MB limit, compressing for Telegram...`);
       await bot.editMessageText(
         `Compressing video (${outMB}MB) to fit Telegram's 50MB limit...`,
         { chat_id: chatId, message_id: statusMsg.message_id }
       );
       await compressForTelegram(tmpOut, tmpCompressed, MAX_UPLOAD_SIZE);
+      const compSize = fs.statSync(tmpCompressed).size;
+      console.log(`[VIDEO] Compressed: ${(compSize / 1024 / 1024).toFixed(1)}MB (from ${outMB}MB)`);
       fileToSend = tmpCompressed;
       compressed = true;
     }
 
+    const sendSize = fs.statSync(fileToSend).size;
+    console.log(`[VIDEO] Sending to Telegram: ${(sendSize / 1024 / 1024).toFixed(1)}MB, compressed=${compressed}`);
     const compNote = compressed ? " (compressed for Telegram)" : "";
     await bot.editMessageText(
       `Done! ${segCount} highlights found${compNote}.\n${summary}`,
@@ -263,12 +272,14 @@ bot.on("video", async (msg) => {
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
       await bot.sendVideo(chatId, fileToSend, { caption });
+      console.log(`[VIDEO] sendVideo OK`);
     } catch (sendErr) {
-      console.log(`[DEBUG] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
+      console.log(`[VIDEO] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
       await bot.sendDocument(chatId, fileToSend, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
+      console.log(`[VIDEO] sendDocument OK`);
     }
   } catch (err) {
-    console.error("Bot error:", err);
+    console.error("[VIDEO] Bot error:", err);
     await bot.editMessageText(
       `Error: ${err.message}`,
       { chat_id: chatId, message_id: statusMsg.message_id }
@@ -305,6 +316,8 @@ bot.on("document", async (msg) => {
 
   try {
     await downloadTelegramFile(doc.file_id, doc.file_size, chatId, msg.message_id, tmpIn);
+    const inputSize = fs.statSync(tmpIn).size;
+    console.log(`[DOC] Downloaded: ${(inputSize / 1024 / 1024).toFixed(1)}MB → ${tmpIn}`);
 
     await bot.editMessageText("Processing with AI... this may take a minute.", {
       chat_id: chatId,
@@ -314,17 +327,19 @@ bot.on("document", async (msg) => {
     const videoBuffer = fs.readFileSync(tmpIn);
     const name = doc.file_name?.replace(/\.[^/.]+$/, "") || "video";
 
-    console.log(`[DEBUG] Sending to API: ${API_URL}/api/auto-edit, video size: ${videoBuffer.length} bytes`);
+    console.log(`[DOC] Sending to API: ${API_URL}/api/auto-edit, size=${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB`);
+    const apiStart = Date.now();
     const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
     });
 
-    console.log(`[DEBUG] API response status: ${res.status}`);
+    const apiElapsed = ((Date.now() - apiStart) / 1000).toFixed(1);
+    console.log(`[DOC] API response: status=${res.status} in ${apiElapsed}s`);
     if (!res.ok) {
       const err = await res.text();
-      console.log(`[DEBUG] API error body: ${err}`);
+      console.log(`[DOC] API error body: ${err}`);
       throw new Error(`API error ${res.status}: ${err}`);
     }
 
@@ -338,19 +353,24 @@ bot.on("document", async (msg) => {
     let fileToSend = tmpOut;
     let compressed = false;
     const outSize = fs.statSync(tmpOut).size;
+    console.log(`[DOC] API output: ${(outSize / 1024 / 1024).toFixed(1)}MB, segments=${segCount}, input was ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
 
     if (outSize > MAX_UPLOAD_SIZE) {
       const outMB = (outSize / (1024 * 1024)).toFixed(1);
-      console.log(`[DOC] Output ${outMB}MB > 50MB, compressing for Telegram...`);
+      console.log(`[DOC] Output ${outMB}MB > 50MB limit, compressing for Telegram...`);
       await bot.editMessageText(
         `Compressing video (${outMB}MB) to fit Telegram's 50MB limit...`,
         { chat_id: chatId, message_id: statusMsg.message_id }
       );
       await compressForTelegram(tmpOut, tmpCompressed, MAX_UPLOAD_SIZE);
+      const compSize = fs.statSync(tmpCompressed).size;
+      console.log(`[DOC] Compressed: ${(compSize / 1024 / 1024).toFixed(1)}MB (from ${outMB}MB)`);
       fileToSend = tmpCompressed;
       compressed = true;
     }
 
+    const sendSize = fs.statSync(fileToSend).size;
+    console.log(`[DOC] Sending to Telegram: ${(sendSize / 1024 / 1024).toFixed(1)}MB, compressed=${compressed}`);
     const compNote = compressed ? " (compressed for Telegram)" : "";
     await bot.editMessageText(
       `Done! ${segCount} highlights found${compNote}.\n${summary}`,
@@ -360,12 +380,14 @@ bot.on("document", async (msg) => {
     const caption = summary ? `AI Edit: ${summary}` : "Here's your highlight reel!";
     try {
       await bot.sendVideo(chatId, fileToSend, { caption });
+      console.log(`[DOC] sendVideo OK`);
     } catch (sendErr) {
-      console.log(`[DEBUG] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
+      console.log(`[DOC] sendVideo failed (${sendErr.message}), falling back to sendDocument`);
       await bot.sendDocument(chatId, fileToSend, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
+      console.log(`[DOC] sendDocument OK`);
     }
   } catch (err) {
-    console.error("Bot error:", err);
+    console.error("[DOC] Bot error:", err);
     await bot.editMessageText(
       `Error: ${err.message}`,
       { chat_id: chatId, message_id: statusMsg.message_id }

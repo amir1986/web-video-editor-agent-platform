@@ -29,9 +29,17 @@ function ffmpeg(args) {
     const [cmd, fullArgs] = process.platform === "win32"
       ? ["wsl", ["-d", WSL_DISTRO, "--", "ffmpeg", ...args]]
       : ["ffmpeg", args];
+    console.log(`[FFMPEG] ${cmd} ${fullArgs.join(" ")}`);
+    const start = Date.now();
     execFile(cmd, fullArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve();
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      if (err) {
+        console.log(`[FFMPEG] FAILED after ${elapsed}s: ${(stderr || err.message).slice(0, 300)}`);
+        reject(new Error(stderr || err.message));
+      } else {
+        console.log(`[FFMPEG] OK in ${elapsed}s`);
+        resolve();
+      }
     });
   });
 }
@@ -40,9 +48,15 @@ function ffprobe(args) {
     const [cmd, fullArgs] = process.platform === "win32"
       ? ["wsl", ["-d", WSL_DISTRO, "--", "ffprobe", ...args]]
       : ["ffprobe", args];
+    console.log(`[FFPROBE] ${cmd} ${fullArgs.join(" ")}`);
     execFile(cmd, fullArgs, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
+      if (err) {
+        console.log(`[FFPROBE] FAILED: ${(stderr || err.message).slice(0, 300)}`);
+        reject(new Error(stderr || err.message));
+      } else {
+        console.log(`[FFPROBE] OK (${stdout.trim().length} chars)`);
+        resolve(stdout.trim());
+      }
     });
   });
 }
@@ -236,6 +250,8 @@ function buildSourceMatchEncodingArgs(sourceQuality, rc) {
     aArgs.push("-ac", String(sourceQuality.audio.channels));
   }
 
+  console.log(`[ENCODE-ARGS] Video: ${vArgs.join(" ")}`);
+  console.log(`[ENCODE-ARGS] Audio: ${aArgs.join(" ")}`);
   return { vArgs, aArgs };
 }
 
@@ -274,6 +290,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   const canCopy = await probeCanStreamCopy(wslIn);
   const copyOrReencode = canCopy ? ["-c", "copy"] : srcVideoArgs;
   const copyLabel = canCopy ? "stream copy" : "re-encode (source-matched)";
+  console.log(`[RENDER] Strategy: ${copyLabel}, needsReencode=${(editPlan.transitions || []).some(t => t.type !== "hard_cut")}, segments=${segments.length}`);
 
   // Build a lookup of transitions by source segment id
   const transMap = {};
@@ -463,8 +480,13 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
       const { vArgs } = buildSourceMatchEncodingArgs(sourceQuality, {});
       codecArgs = vArgs;
     }
-    console.log(`Trimming: in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode source-matched"})`);
+    const inputSize = fs.statSync(tmpIn).size;
+    console.log(`[TRIM] Input: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
+    console.log(`[TRIM] in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode source-matched"})`);
+    console.log(`[TRIM] ffmpeg args: ${codecArgs.join(" ")}`);
     await ffmpeg(["-y", "-loglevel", "error", "-ss", String(inSec), "-i", wslIn, "-t", String(outSec - inSec), ...codecArgs, "-avoid_negative_ts", "make_zero", wslOut]);
+    const outputSize = fs.statSync(tmpOut).size;
+    console.log(`[TRIM] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
     res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
@@ -484,6 +506,8 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
   fs.mkdirSync(tmpDir);
   try {
     fs.writeFileSync(tmpIn, req.body);
+    const inputSize = fs.statSync(tmpIn).size;
+    console.log(`[AUTO-EDIT] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
     // Probe video metadata
@@ -515,7 +539,12 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
 
     // Render the EditPlan to video using source-matched quality
     console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
+    const renderStart = Date.now();
     await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+    const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
+    const outputSize = fs.statSync(tmpOut).size;
+    console.log(`[AUTO-EDIT] Render done in ${renderElapsed}s`);
+    console.log(`[AUTO-EDIT] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB, ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
 
     const summary = `${segments.length} highlights selected`;
     res.set("Content-Type", "video/mp4");
