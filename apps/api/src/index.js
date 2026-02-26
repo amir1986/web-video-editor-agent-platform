@@ -8,6 +8,44 @@ const crypto = require("crypto");
 
 const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 
+// ---------------------------------------------------------------------------
+// Simple token-based authentication
+// ---------------------------------------------------------------------------
+const AUTH_SECRET = process.env.AUTH_SECRET || "";
+const AUTH_ENABLED = !!AUTH_SECRET;
+
+function generateToken(userId) {
+  const payload = JSON.stringify({ uid: userId, iat: Date.now() });
+  const hmac = crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("hex");
+  return Buffer.from(payload).toString("base64url") + "." + hmac;
+}
+
+function verifyToken(token) {
+  if (!AUTH_ENABLED) return { uid: "anonymous" };
+  if (!token) return null;
+  const [payloadB64, sig] = token.split(".");
+  if (!payloadB64 || !sig) return null;
+  const payload = Buffer.from(payloadB64, "base64url").toString();
+  const expected = crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("hex");
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(payload);
+    // Tokens expire after 24 hours
+    if (Date.now() - data.iat > 86400000) return null;
+    return data;
+  } catch { return null; }
+}
+
+function authMiddleware(req, res, next) {
+  if (!AUTH_ENABLED) return next();
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : req.query.token;
+  const user = verifyToken(token);
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  req.user = user;
+  next();
+}
+
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
 app.use(express.json({ limit: "10mb" }));
@@ -441,7 +479,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
 //  Streams NDJSON progress events automatically, final line is the result.
 //  Client receives lines like: {"type":"progress","agent":"CUT","message":"..."}
 //  Last line:                   {"type":"result","editPlan":{...},"summary":"..."}
-app.post("/api/analyze", async (req, res) => {
+app.post("/api/analyze", authMiddleware, async (req, res) => {
   const { duration, frames, width, height, fps } = req.body;
 
   // Stream NDJSON progress to the client in real-time
@@ -486,7 +524,7 @@ app.post("/api/analyze", async (req, res) => {
 });
 
 //  POST /api/trim 
-app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+app.post("/api/trim", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
@@ -529,7 +567,7 @@ app.post("/api/trim", express.raw({ type: "*/*", limit: "2gb" }), async (req, re
 });
 
 //  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
-app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name   = req.query.name || "video";
   const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
@@ -598,7 +636,7 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
 //  POST /api/render — render a pre-built EditPlan (no AI pipeline)
 //  The web client already has the EditPlan from /api/analyze, so this
 //  endpoint skips AI entirely and only does the ffmpeg rendering step.
-app.post("/api/render", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
 
@@ -665,7 +703,7 @@ app.post("/api/render", express.raw({ type: "*/*", limit: "2gb" }), async (req, 
  * Response format: SSE events followed by a final JSON with download URL.
  * Events: { agent, message, timestamp }
  */
-app.post("/api/auto-edit-stream", express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
   // Set up SSE headers
@@ -747,15 +785,160 @@ app.post("/api/auto-edit-stream", express.raw({ type: "*/*", limit: "2gb" }), as
 
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
-app.listen(3001, () => {
+// ---------------------------------------------------------------------------
+// Authentication endpoints
+// ---------------------------------------------------------------------------
+
+app.post("/api/auth/login", (req, res) => {
+  if (!AUTH_ENABLED) {
+    return res.json({ token: generateToken("anonymous"), user: { uid: "anonymous" } });
+  }
+  const { password } = req.body || {};
+  if (password !== AUTH_SECRET) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  const uid = "user_" + crypto.randomBytes(4).toString("hex");
+  const token = generateToken(uid);
+  res.json({ token, user: { uid } });
+});
+
+app.get("/api/auth/verify", authMiddleware, (req, res) => {
+  res.json({ valid: true, user: req.user || { uid: "anonymous" } });
+});
+
+// ---------------------------------------------------------------------------
+// Text overlay endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/overlay — Burn text overlays onto a video
+ * Body: raw video bytes
+ * Header X-Overlays: JSON array of text overlay definitions
+ * Each overlay: { text, x, y, fontSize, color, from, to }
+ *   - text: string to display
+ *   - x, y: position (0-100 percentage)
+ *   - fontSize: number (default 24)
+ *   - color: hex color (default "white")
+ *   - from, to: time range in seconds (optional — full video if omitted)
+ */
+app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
+
+  const overlaysHeader = req.headers["x-overlays"];
+  if (!overlaysHeader) return res.status(400).json({ error: "Missing X-Overlays header" });
+  let overlays;
+  try {
+    overlays = JSON.parse(overlaysHeader);
+    if (!Array.isArray(overlays) || overlays.length === 0) throw new Error("empty");
+  } catch {
+    return res.status(400).json({ error: "Invalid X-Overlays JSON" });
+  }
+
+  const name = req.query.name || "video";
+  const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
+  const tmpDir = path.join(os.tmpdir(), `overlay_${crypto.randomBytes(4).toString("hex")}`);
+  fs.mkdirSync(tmpDir);
+  try {
+    fs.writeFileSync(tmpIn, req.body);
+    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    const sourceQuality = await probeSourceQuality(wslIn);
+    const { vArgs, aArgs } = buildSourceMatchEncodingArgs(sourceQuality, {});
+
+    // Build drawtext filter chain
+    const drawFilters = overlays.map((o, i) => {
+      const text = (o.text || "").replace(/'/g, "'\\''").replace(/:/g, "\\:");
+      const fontSize = o.fontSize || 24;
+      const color = o.color || "white";
+      const x = o.x != null ? `(w*${o.x / 100})` : "(w-text_w)/2";
+      const y = o.y != null ? `(h*${o.y / 100})` : "(h-text_h)/2";
+      let enable = "";
+      if (o.from != null && o.to != null) {
+        enable = `:enable='between(t,${o.from},${o.to})'`;
+      }
+      return `drawtext=text='${text}':fontsize=${fontSize}:fontcolor=${color}:x=${x}:y=${y}${enable}`;
+    });
+
+    const filterScriptPath = path.join(tmpDir, "overlay_filter.txt");
+    fs.writeFileSync(filterScriptPath, drawFilters.join(","));
+    console.log(`[OVERLAY] ${overlays.length} text overlays, filter: ${drawFilters.join(",").slice(0, 200)}...`);
+
+    await ffmpeg(["-y", "-loglevel", "error", "-i", wslIn, "-filter_complex_script", toWslPath(filterScriptPath), ...vArgs, ...aArgs, wslOut]);
+
+    res.set("Content-Type", "video/mp4");
+    res.set("Content-Disposition", `attachment; filename="${name}_overlay.mp4"`);
+    res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
+  } catch (err) {
+    cleanup(tmpIn, tmpOut);
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    console.error("[OVERLAY ERROR]", err);
+    res.status(500).json({ error: "Overlay failed" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Audio volume adjustment endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/adjust-audio — Adjust audio volume of a video
+ * Body: raw video bytes
+ * Query: volume (0-200, percentage, default 100)
+ */
+app.post("/api/adjust-audio", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
+  const volume = parseFloat(req.query.volume || "100");
+  if (isNaN(volume) || volume < 0 || volume > 200) return res.status(400).json({ error: "Volume must be 0-200" });
+  const name = req.query.name || "video";
+  const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
+  try {
+    fs.writeFileSync(tmpIn, req.body);
+    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    const vol = (volume / 100).toFixed(2);
+    console.log(`[AUDIO] Adjusting volume to ${volume}% (${vol}x)`);
+    if (volume === 100) {
+      // No change needed — stream copy
+      await ffmpeg(["-y", "-loglevel", "error", "-i", wslIn, "-c", "copy", wslOut]);
+    } else if (volume === 0) {
+      // Mute — remove audio
+      await ffmpeg(["-y", "-loglevel", "error", "-i", wslIn, "-c:v", "copy", "-an", wslOut]);
+    } else {
+      await ffmpeg(["-y", "-loglevel", "error", "-i", wslIn, "-c:v", "copy", "-af", `volume=${vol}`, "-c:a", "aac", wslOut]);
+    }
+    res.set("Content-Type", "video/mp4");
+    res.set("Content-Disposition", `attachment; filename="${name}_audio.mp4"`);
+    res.sendFile(tmpOut, () => cleanup(tmpIn, tmpOut));
+  } catch (err) {
+    cleanup(tmpIn, tmpOut);
+    console.error("[AUDIO ERROR]", err);
+    res.status(500).json({ error: "Audio adjustment failed" });
+  }
+});
+
+// Serve built frontend in production
+const webDist = path.join(__dirname, "../../web/dist");
+if (fs.existsSync(webDist)) {
+  app.use(express.static(webDist));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api/")) return next();
+    res.sendFile(path.join(webDist, "index.html"));
+  });
+}
+
+const PORT = parseInt(process.env.PORT || "3001", 10);
+app.listen(PORT, () => {
   const provider = process.env.ANTHROPIC_API_KEY ? "Claude API (auto-detected)" : "Ollama (local)";
-  console.log("VideoAgent API on http://localhost:3001");
+  console.log(`VideoAgent API on http://localhost:${PORT}`);
   console.log(`  LLM Provider: ${provider}`);
+  console.log(`  Auth: ${AUTH_ENABLED ? "ENABLED (set AUTH_SECRET)" : "DISABLED (open access)"}`);
+  console.log("  POST /api/auth/login       - Get auth token");
+  console.log("  GET  /api/auth/verify      - Verify token");
   console.log("  POST /api/analyze          - AI analysis (web client)");
   console.log("  POST /api/render           - Render pre-built EditPlan (web client)");
   console.log("  POST /api/trim             - Single segment trim");
   console.log("  POST /api/auto-edit        - Full highlight reel (bots)");
   console.log("  POST /api/auto-edit-stream - Full highlight reel with SSE progress");
+  console.log("  POST /api/overlay          - Burn text overlays onto video");
+  console.log("  POST /api/adjust-audio     - Adjust audio volume");
   console.log("  GET  /api/health           - Health check");
   console.log("  MCP: node src/mcp-server.js (stdio transport)");
 });

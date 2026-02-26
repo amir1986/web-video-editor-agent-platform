@@ -1,15 +1,37 @@
-﻿import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
 import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
-// preload ffmpeg in background
 preloadFFmpeg().catch(console.error);
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 interface Clip { id: string; name: string; url: string; duration: number; }
-interface EditPlan { segments: { id: string; src_in: number; src_out: number }[]; transitions?: { from: string; to: string; type: string }[]; render_constraints?: Record<string, unknown>; notes?: Record<string, unknown>; quality_guard?: { constraints_ok: boolean; checks: Record<string, boolean>; required_fixes: string[] }; }
-interface ProjectState { clips: Clip[]; inOut: { in: number; out: number }; titles: string[]; exports: string[]; editPlan?: EditPlan; }
-const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [] };
+interface Segment { id: string; src_in: number; src_out: number; }
+interface Transition { from: string; to: string; type: string; }
+interface EditPlan {
+  segments: Segment[];
+  transitions?: Transition[];
+  render_constraints?: Record<string, unknown>;
+  notes?: Record<string, unknown>;
+  quality_guard?: { constraints_ok: boolean; checks: Record<string, boolean>; required_fixes: string[] };
+}
+interface TextOverlay { id: string; text: string; x: number; y: number; fontSize: number; color: string; from: number; to: number; }
+interface ProjectState {
+  clips: Clip[];
+  inOut: { in: number; out: number };
+  titles: string[];
+  exports: string[];
+  editPlan?: EditPlan;
+  overlays?: TextOverlay[];
+  volume?: number;
+}
+const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [], overlays: [], volume: 100 };
+
+type Tab = "ai" | "overlays" | "audio";
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
@@ -21,29 +43,53 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportDone, setExportDone] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("ai");
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const progressEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll progress feed
+  useEffect(() => {
+    progressEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [agentProgress]);
 
   useEffect(() => {
     loadFromDB().then((s) => {
       if (!s) return;
       const restored = s as ProjectState;
-      // Blob URLs don't survive page reloads — drop stale clips
       restored.clips = restored.clips.filter(c => !c.url.startsWith("blob:"));
       if (restored.clips.length === 0) {
         restored.inOut = { in: 0, out: 0 };
         restored.editPlan = undefined;
       }
+      if (!restored.overlays) restored.overlays = [];
+      if (restored.volume == null) restored.volume = 100;
       setState(restored);
     }).catch(console.error);
   }, []);
 
-  const save = (newState: ProjectState) => { setState(newState); saveToDB(newState).catch(console.error); };
+  // Auto-login (auth is transparent when disabled on server)
+  useEffect(() => {
+    fetch(`${API_BASE}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    })
+      .then(r => r.json())
+      .then(d => { if (d.token) setAuthToken(d.token); })
+      .catch(() => {});
+  }, []);
+
+  const save = useCallback((newState: ProjectState) => {
+    setState(newState);
+    saveToDB(newState).catch(console.error);
+  }, []);
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const url = URL.createObjectURL(file);
-    save({ ...state, clips: [...state.clips, { id: Date.now().toString(), name: file.name, url, duration: 0 }] });
+    save({ ...state, clips: [...state.clips, { id: Date.now().toString(), name: file.name, url, duration: 0 }], editPlan: undefined, overlays: [] });
   };
 
   const handleVideoLoad = () => {
@@ -64,10 +110,61 @@ export default function App() {
     return `${m}:${s}`;
   };
 
+  const fmtDec = (t: number) => {
+    const m = Math.floor(t / 60).toString().padStart(2, "0");
+    const s = (t % 60).toFixed(1).padStart(4, "0");
+    return `${m}:${s}`;
+  };
+
   const activeClip = state.clips[state.clips.length - 1];
   const duration = activeClip?.duration || 0;
+  const segments = state.editPlan?.segments || [];
+  const transitions = state.editPlan?.transitions || [];
 
   const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
+
+  const authHeaders = (): Record<string, string> => {
+    if (!authToken) return {};
+    return { Authorization: `Bearer ${authToken}` };
+  };
+
+  // Jump to segment start on click
+  const jumpToSegment = (seg: Segment) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = seg.src_in;
+    setCurrentTime(seg.src_in);
+  };
+
+  // Remove a segment from the edit plan
+  const removeSegment = (segId: string) => {
+    if (!state.editPlan) return;
+    const newSegs = state.editPlan.segments.filter(s => s.id !== segId);
+    const newTrans = (state.editPlan.transitions || []).filter(t => t.from !== segId && t.to !== segId);
+    save({ ...state, editPlan: { ...state.editPlan, segments: newSegs, transitions: newTrans } });
+  };
+
+  // Text overlay management
+  const addOverlay = () => {
+    const overlay: TextOverlay = {
+      id: Date.now().toString(),
+      text: "Title",
+      x: 50, y: 10,
+      fontSize: 32,
+      color: "#ffffff",
+      from: 0,
+      to: duration || 5,
+    };
+    save({ ...state, overlays: [...(state.overlays || []), overlay] });
+  };
+
+  const updateOverlay = (id: string, patch: Partial<TextOverlay>) => {
+    const overlays = (state.overlays || []).map(o => o.id === id ? { ...o, ...patch } : o);
+    save({ ...state, overlays });
+  };
+
+  const removeOverlay = (id: string) => {
+    save({ ...state, overlays: (state.overlays || []).filter(o => o.id !== id) });
+  };
 
   const handleAutoEdit = async () => {
     if (!videoRef.current || !activeClip) return;
@@ -85,10 +182,9 @@ export default function App() {
       const width = videoRef.current.videoWidth || 0;
       const height = videoRef.current.videoHeight || 0;
 
-      // Streaming NDJSON — read progress events in real-time
       const res = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ duration, frames, width, height, fps: 30 }),
         signal: controller.signal,
       });
@@ -98,7 +194,6 @@ export default function App() {
         throw new Error(`Server error ${res.status}: ${errText}`);
       }
 
-      // Read NDJSON stream line by line for live progress
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -122,12 +217,10 @@ export default function App() {
               throw new Error(event.message || event.error);
             }
           } catch (parseErr) {
-            // Try parsing the whole buffer as plain JSON (fallback for non-streaming)
             try { data = JSON.parse(line); } catch {}
           }
         }
       }
-      // Handle any remaining buffer
       if (buffer.trim()) {
         try {
           const event = JSON.parse(buffer);
@@ -138,7 +231,6 @@ export default function App() {
 
       if (!data) throw new Error("No result received from server");
 
-      // Parse the EditPlan from the streamed result
       const editPlan: EditPlan | undefined = (data.editPlan as EditPlan) || undefined;
       const segs = editPlan?.segments || (data.segments as EditPlan["segments"]) || [];
 
@@ -151,34 +243,51 @@ export default function App() {
       const summary = (data.summary as string) || `${segs.length} highlights selected`;
       setAgentSummary(summary);
 
-      // Export: use multi-segment auto-edit if we have an editPlan
-      setExporting(true);
-      setExportProgress(0);
-      const name = activeClip.name.replace(/\.[^/.]+$/, "");
-      if (editPlan && segs.length > 1) {
-        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
-      } else {
-        await exportTrimmed(activeClip.url, newInOut.in, newInOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
-      }
-      setExportDone(true);
-      setExporting(false);
-
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
       setAgentSummary(`Error: ${msg}`);
-      setExporting(false);
     } finally {
       clearTimeout(timeout);
     }
     setAgentLoading(false);
   };
 
+  const handleExport = async () => {
+    if (!activeClip || exporting || agentLoading) return;
+    setExporting(true);
+    setExportProgress(0);
+    setExportDone(false);
+    try {
+      const name = activeClip.name.replace(/\.[^/.]+$/, "");
+      const editPlan = state.editPlan;
+      if (editPlan && editPlan.segments.length > 1) {
+        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
+      } else {
+        await exportTrimmed(activeClip.url, state.inOut.in, state.inOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
+      }
+      setExportDone(true);
+    } catch (err) {
+      console.error(err);
+      setAgentSummary(`Export error: ${err instanceof Error ? err.message : "Unknown"}`);
+    }
+    setExporting(false);
+  };
+
+  // Get transition type label
+  const getTransLabel = (fromId: string): string => {
+    const t = transitions.find(tr => tr.from === fromId);
+    if (!t || t.type === "hard_cut") return "CUT";
+    return t.type.replace(/_/g, " ").toUpperCase();
+  };
+
+  const totalHighlight = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+
   return (
     <div className="app">
 
       <aside className="sidebar">
-        <div className="logo"> VideoAgent</div>
+        <div className="logo">VideoAgent</div>
 
         <div className="section-label">Assets</div>
         <label className="import-btn">
@@ -192,7 +301,6 @@ export default function App() {
             ? <div className="empty-clips">No clips yet</div>
             : state.clips.map((c) => (
               <div key={c.id} className={`clip-item ${c.id === activeClip?.id ? "active" : ""}`}>
-                <span className="clip-icon"></span>
                 <span className="clip-name">{c.name}</span>
                 <span className="clip-dur">{fmt(c.duration)}</span>
               </div>
@@ -201,6 +309,13 @@ export default function App() {
         </div>
 
         <div className="spacer" />
+
+        {/* Export section */}
+        {activeClip && !exporting && !exportDone && (
+          <button className="export-btn" onClick={handleExport} disabled={exporting || agentLoading}>
+            Export {segments.length > 0 ? `(${segments.length} segments)` : "Trim"}
+          </button>
+        )}
 
         {exporting && (
           <div className="export-box">
@@ -213,7 +328,7 @@ export default function App() {
         )}
 
         {exportDone && !exporting && (
-          <div className="export-done-box"> Download started!</div>
+          <div className="export-done-box">Download started!</div>
         )}
       </aside>
 
@@ -221,7 +336,7 @@ export default function App() {
         <div className="preview-area">
           <div className="preview-header">
             <span className="preview-title">Preview</span>
-            <span className="timecode">{fmt(currentTime)}</span>
+            <span className="timecode">{fmtDec(currentTime)}</span>
           </div>
 
           <div className="video-wrap">
@@ -236,13 +351,12 @@ export default function App() {
               />
             ) : (
               <div className="empty-video">
-                <div className="empty-icon"></div>
                 <div className="empty-text">Import a video to get started</div>
               </div>
             )}
             {activeClip && (
               <button className="play-overlay" onClick={togglePlay}>
-                {playing ? "" : ""}
+                {playing ? "\u23F8" : "\u25B6"}
               </button>
             )}
           </div>
@@ -253,80 +367,222 @@ export default function App() {
           </div>
         </div>
 
+        {/* Timeline with segment visualization */}
         <div className="timeline-area">
           <div className="timeline-header">
-            <span className="tl-label">In <strong>{fmt(state.inOut.in)}</strong></span>
-            <span className="tl-dur"> {fmt(state.inOut.out - state.inOut.in)} </span>
-            <span className="tl-label">Out <strong>{fmt(state.inOut.out)}</strong></span>
+            <span className="tl-label">In <strong>{fmtDec(state.inOut.in)}</strong></span>
+            <span className="tl-dur">{fmt(state.inOut.out - state.inOut.in)}</span>
+            <span className="tl-label">Out <strong>{fmtDec(state.inOut.out)}</strong></span>
           </div>
           <div className="timeline-track">
             <div className="tl-bg" />
-            <div className="tl-range" style={{
-              left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
-              width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%"
-            }} />
+            {/* Show individual segments if editPlan exists */}
+            {segments.length > 0 ? (
+              segments.map((seg) => (
+                <div
+                  key={seg.id}
+                  className="tl-segment"
+                  title={`${seg.id}: ${fmtDec(seg.src_in)} - ${fmtDec(seg.src_out)}`}
+                  style={{
+                    left: duration ? `${(seg.src_in / duration) * 100}%` : "0%",
+                    width: duration ? `${((seg.src_out - seg.src_in) / duration) * 100}%` : "0%",
+                  }}
+                  onClick={() => jumpToSegment(seg)}
+                />
+              ))
+            ) : (
+              <div className="tl-range" style={{
+                left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
+                width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%"
+              }} />
+            )}
             <div className="tl-head" style={{ left: duration ? `${(currentTime / duration) * 100}%` : "0%" }} />
           </div>
-          <div className="inout-row">
-            <label>
-              <span>In</span>
-              <input type="range" min={0} max={duration} step={0.05} value={state.inOut.in}
-                onChange={e => save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } })} />
-            </label>
-            <label>
-              <span>Out</span>
-              <input type="range" min={0} max={duration} step={0.05} value={state.inOut.out}
-                onChange={e => save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } })} />
-            </label>
-          </div>
+
+          {/* Segment cards */}
+          {segments.length > 0 && (
+            <div className="segment-cards">
+              {segments.map((seg, i) => (
+                <React.Fragment key={seg.id}>
+                  <div
+                    className={`seg-card ${currentTime >= seg.src_in && currentTime <= seg.src_out ? "active" : ""}`}
+                    onClick={() => jumpToSegment(seg)}
+                  >
+                    <span className="seg-id">{seg.id}</span>
+                    <span className="seg-time">{fmtDec(seg.src_in)} - {fmtDec(seg.src_out)}</span>
+                    <span className="seg-dur">{(seg.src_out - seg.src_in).toFixed(1)}s</span>
+                    <button className="seg-remove" onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); }} title="Remove segment">&times;</button>
+                  </div>
+                  {i < segments.length - 1 && (
+                    <span className="seg-transition">{getTransLabel(seg.id)}</span>
+                  )}
+                </React.Fragment>
+              ))}
+              <div className="seg-total">Total: {totalHighlight.toFixed(1)}s ({duration ? Math.round(totalHighlight / duration * 100) : 0}%)</div>
+            </div>
+          )}
+
+          {/* In/Out controls (when no segments) */}
+          {segments.length === 0 && (
+            <div className="inout-row">
+              <label>
+                <span>In</span>
+                <input type="range" min={0} max={duration} step={0.05} value={state.inOut.in}
+                  onChange={e => save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } })} />
+              </label>
+              <label>
+                <span>Out</span>
+                <input type="range" min={0} max={duration} step={0.05} value={state.inOut.out}
+                  onChange={e => save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } })} />
+              </label>
+            </div>
+          )}
         </div>
       </main>
 
       <aside className="agent-panel">
-        <div className="agent-header">
-          <span className="pulse" />
-          <span>AI Agent</span>
-          <span className="agent-model">multi-agent</span>
+        {/* Tab navigation */}
+        <div className="panel-tabs">
+          <button className={`panel-tab ${activeTab === "ai" ? "active" : ""}`} onClick={() => setActiveTab("ai")}>AI Agent</button>
+          <button className={`panel-tab ${activeTab === "overlays" ? "active" : ""}`} onClick={() => setActiveTab("overlays")}>Text</button>
+          <button className={`panel-tab ${activeTab === "audio" ? "active" : ""}`} onClick={() => setActiveTab("audio")}>Audio</button>
         </div>
 
         <div className="agent-body">
-          <div className="agent-desc">
-            AI agents will analyze your video frames and automatically find the best highlights, then download the result.
-          </div>
+          {/* AI Tab */}
+          {activeTab === "ai" && (
+            <>
+              <div className="agent-desc">
+                AI agents analyze your video and automatically select the best highlights.
+              </div>
 
-          <button
-            className={`auto-edit-btn ${agentLoading || exporting ? "loading" : ""}`}
-            onClick={handleAutoEdit}
-            disabled={agentLoading || exporting || !activeClip}
-          >
-            {agentLoading ? (
-              <><span className="spinner" /> Analyzing frames...</>
-            ) : exporting ? (
-              <><span className="spinner" /> Exporting {exportProgress}%...</>
-            ) : (
-              <><span></span> Auto Edit with AI</>
-            )}
-          </button>
+              <button
+                className={`auto-edit-btn ${agentLoading || exporting ? "loading" : ""}`}
+                onClick={handleAutoEdit}
+                disabled={agentLoading || exporting || !activeClip}
+              >
+                {agentLoading ? (
+                  <><span className="spinner" /> Analyzing...</>
+                ) : exporting ? (
+                  <><span className="spinner" /> Exporting {exportProgress}%...</>
+                ) : (
+                  "Auto Edit with AI"
+                )}
+              </button>
 
-          {agentProgress.length > 0 && agentLoading && (
-            <div className="agent-progress">
-              {agentProgress.map((msg, i) => (
-                <div key={i} className="agent-progress-item">
-                  <span className="progress-dot" />
-                  <span>{msg}</span>
+              {agentProgress.length > 0 && agentLoading && (
+                <div className="agent-progress">
+                  {agentProgress.map((msg, i) => (
+                    <div key={i} className="agent-progress-item">
+                      <span className="progress-dot" />
+                      <span>{msg}</span>
+                    </div>
+                  ))}
+                  <div ref={progressEndRef} />
                 </div>
-              ))}
-            </div>
+              )}
+
+              {agentSummary && (
+                <div className={`agent-result ${agentSummary.startsWith("Error") ? "error" : ""}`}>
+                  <div className="agent-result-label">{agentSummary.startsWith("Error") ? "Error" : "AI Decision"}</div>
+                  <div className="agent-result-text">{agentSummary}</div>
+                </div>
+              )}
+            </>
           )}
 
-          {agentSummary && (
-            <div className="agent-result">
-              <div className="agent-result-label">AI Decision</div>
-              <div className="agent-result-text">{agentSummary}</div>
-              <div className="agent-result-range">
-                {fmt(state.inOut.in)}  {fmt(state.inOut.out)}
+          {/* Text Overlay Tab */}
+          {activeTab === "overlays" && (
+            <>
+              <div className="agent-desc">
+                Add text overlays to your video. They will be burned into the export.
               </div>
-            </div>
+
+              <button className="auto-edit-btn" onClick={addOverlay} disabled={!activeClip}>
+                + Add Text Overlay
+              </button>
+
+              <div className="overlay-list">
+                {(state.overlays || []).map(o => (
+                  <div key={o.id} className="overlay-card">
+                    <div className="overlay-row">
+                      <input
+                        className="overlay-text-input"
+                        value={o.text}
+                        onChange={e => updateOverlay(o.id, { text: e.target.value })}
+                        placeholder="Enter text..."
+                      />
+                      <button className="seg-remove" onClick={() => removeOverlay(o.id)}>&times;</button>
+                    </div>
+                    <div className="overlay-row">
+                      <label className="overlay-label">
+                        Size
+                        <input type="range" min={12} max={72} value={o.fontSize}
+                          onChange={e => updateOverlay(o.id, { fontSize: parseInt(e.target.value) })} />
+                        <span className="overlay-val">{o.fontSize}</span>
+                      </label>
+                    </div>
+                    <div className="overlay-row">
+                      <label className="overlay-label">
+                        Color
+                        <input type="color" value={o.color} onChange={e => updateOverlay(o.id, { color: e.target.value })} />
+                      </label>
+                      <label className="overlay-label">
+                        X
+                        <input type="range" min={0} max={100} value={o.x}
+                          onChange={e => updateOverlay(o.id, { x: parseInt(e.target.value) })} />
+                      </label>
+                      <label className="overlay-label">
+                        Y
+                        <input type="range" min={0} max={100} value={o.y}
+                          onChange={e => updateOverlay(o.id, { y: parseInt(e.target.value) })} />
+                      </label>
+                    </div>
+                    <div className="overlay-row">
+                      <label className="overlay-label">
+                        From
+                        <input type="number" min={0} max={duration} step={0.1} value={o.from}
+                          onChange={e => updateOverlay(o.id, { from: parseFloat(e.target.value) || 0 })} />
+                      </label>
+                      <label className="overlay-label">
+                        To
+                        <input type="number" min={0} max={duration} step={0.1} value={o.to}
+                          onChange={e => updateOverlay(o.id, { to: parseFloat(e.target.value) || duration })} />
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Audio Tab */}
+          {activeTab === "audio" && (
+            <>
+              <div className="agent-desc">
+                Adjust the audio volume for your video export.
+              </div>
+
+              <div className="volume-control">
+                <div className="volume-header">
+                  <span className="volume-label">Volume</span>
+                  <span className="volume-value">{state.volume ?? 100}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={200}
+                  value={state.volume ?? 100}
+                  onChange={e => save({ ...state, volume: parseInt(e.target.value) })}
+                />
+                <div className="volume-presets">
+                  <button onClick={() => save({ ...state, volume: 0 })}>Mute</button>
+                  <button onClick={() => save({ ...state, volume: 50 })}>50%</button>
+                  <button onClick={() => save({ ...state, volume: 100 })}>100%</button>
+                  <button onClick={() => save({ ...state, volume: 150 })}>150%</button>
+                </div>
+              </div>
+            </>
           )}
         </div>
       </aside>
@@ -334,6 +590,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
