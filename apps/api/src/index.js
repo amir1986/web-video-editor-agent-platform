@@ -914,6 +914,59 @@ app.post("/api/adjust-audio", authMiddleware, express.raw({ type: "*/*", limit: 
   }
 });
 
+// POST /api/merge — Concatenate multiple video files in order
+const multer = require("multer");
+const mergeUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 200 * 1024 * 1024 } });
+
+app.post("/api/merge", authMiddleware, mergeUpload.array("videos", 20), async (req, res) => {
+  const files = req.files || [];
+  const tmpDir = path.join(os.tmpdir(), `merge_${crypto.randomBytes(4).toString("hex")}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+  let tmpOut = "";
+
+  try {
+    if (files.length < 2) {
+      return res.status(400).json({ error: "Need at least 2 files to merge" });
+    }
+
+    // Build concat list
+    const concatFile = path.join(tmpDir, "concat.txt");
+    const lines = files.map(f => `file '${toWslPath(f.path)}'`);
+    fs.writeFileSync(concatFile, lines.join("\n"));
+
+    tmpOut = tmpFile("mp4");
+    console.log(`[MERGE] Merging ${files.length} files...`);
+
+    await ffmpeg([
+      "-y", "-loglevel", "error",
+      "-f", "concat", "-safe", "0",
+      "-i", toWslPath(concatFile),
+      "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+      "-c:a", "aac", "-b:a", "192k",
+      "-movflags", "+faststart",
+      toWslPath(tmpOut),
+    ]);
+
+    const outSize = fs.statSync(tmpOut).size;
+    console.log(`[MERGE] Done: ${(outSize / 1024 / 1024).toFixed(1)}MB from ${files.length} files`);
+
+    const name = req.query.name || "merged";
+    res.set("Content-Type", "video/mp4");
+    res.set("Content-Disposition", `attachment; filename="${name}.mp4"`);
+    res.sendFile(tmpOut, () => {
+      cleanup(tmpOut);
+      files.forEach(f => { try { fs.unlinkSync(f.path); } catch {} });
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    });
+  } catch (err) {
+    cleanup(tmpOut);
+    files.forEach(f => { try { fs.unlinkSync(f.path); } catch {} });
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    console.error("[MERGE ERROR]", err);
+    res.status(500).json({ error: "Merge failed" });
+  }
+});
+
 // Serve built frontend in production
 const webDist = path.join(__dirname, "../../web/dist");
 if (fs.existsSync(webDist)) {
@@ -939,6 +992,7 @@ app.listen(PORT, () => {
   console.log("  POST /api/auto-edit-stream - Full highlight reel with SSE progress");
   console.log("  POST /api/overlay          - Burn text overlays onto video");
   console.log("  POST /api/adjust-audio     - Adjust audio volume");
+  console.log("  POST /api/merge            - Merge multiple videos");
   console.log("  GET  /api/health           - Health check");
   console.log("  MCP: node src/mcp-server.js (stdio transport)");
 });

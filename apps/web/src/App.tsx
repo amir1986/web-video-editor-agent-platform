@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
-import { saveProjectState as saveToDB, loadProjectState as loadFromDB } from "./utils/indexedDB";
+import { saveProjectState as saveToDB, loadProjectState as loadFromDB, saveFile, loadFile } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
 import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
 preloadFFmpeg().catch(console.error);
@@ -28,10 +28,15 @@ interface ProjectState {
   editPlan?: EditPlan;
   overlays?: TextOverlay[];
   volume?: number;
+  savedAgentSummary?: string | null;
+  savedActiveTab?: Tab;
 }
 const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [], overlays: [], volume: 100 };
 
 type Tab = "ai" | "overlays" | "audio";
+
+const AI_STEPS = ["CUT", "STRUCTURE", "CONTINUITY", "TRANSITION", "CONSTRAINTS", "QUALITY_GUARD"] as const;
+type AIStep = typeof AI_STEPS[number];
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
@@ -45,26 +50,76 @@ export default function App() {
   const [exportDone, setExportDone] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("ai");
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    (localStorage.getItem("theme") as "dark" | "light") || "dark"
+  );
+  const [toast, setToast] = useState<string | null>(null);
+  const [draggingOver, setDraggingOver] = useState(false);
+  const [agentStartTime, setAgentStartTime] = useState<number | null>(null);
+  const [agentElapsed, setAgentElapsed] = useState(0);
+  const [agentCurrentStep, setAgentCurrentStep] = useState<string | null>(null);
+  const [dragClipIdx, setDragClipIdx] = useState<number | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressEndRef = useRef<HTMLDivElement>(null);
+  const stepTimestampsRef = useRef<Record<string, number>>({});
+
+  // Theme
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   // Auto-scroll progress feed
   useEffect(() => {
     progressEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [agentProgress]);
 
+  // Elapsed time counter during AI analysis
   useEffect(() => {
-    loadFromDB().then((s) => {
+    if (!agentLoading || !agentStartTime) { setAgentElapsed(0); return; }
+    const iv = setInterval(() => setAgentElapsed(Math.floor((Date.now() - agentStartTime) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [agentLoading, agentStartTime]);
+
+  // Restore session from IndexedDB
+  useEffect(() => {
+    loadFromDB().then(async (s) => {
       if (!s) return;
       const restored = s as ProjectState;
-      restored.clips = restored.clips.filter(c => !c.url.startsWith("blob:"));
+      if (!restored.overlays) restored.overlays = [];
+      if (restored.volume == null) restored.volume = 100;
+
+      // Restore files from IndexedDB
+      const restoredClips: Clip[] = [];
+      for (const clip of restored.clips) {
+        const file = await loadFile(clip.id).catch(() => null);
+        if (file) {
+          restoredClips.push({ ...clip, url: URL.createObjectURL(file) });
+        }
+        // If no file in IndexedDB, skip (blob URLs don't survive refresh)
+      }
+      restored.clips = restoredClips;
+
       if (restored.clips.length === 0) {
         restored.inOut = { in: 0, out: 0 };
         restored.editPlan = undefined;
       }
-      if (!restored.overlays) restored.overlays = [];
-      if (restored.volume == null) restored.volume = 100;
+
       setState(restored);
+      if (restored.savedAgentSummary) setAgentSummary(restored.savedAgentSummary);
+      if (restored.savedActiveTab) setActiveTab(restored.savedActiveTab);
+
+      if (restoredClips.length > 0) {
+        setToast("Session restored");
+      }
     }).catch(console.error);
   }, []);
 
@@ -85,11 +140,63 @@ export default function App() {
     saveToDB(newState).catch(console.error);
   }, []);
 
+  // Persist agentSummary and activeTab changes
+  const saveAgentSummary = useCallback((summary: string | null) => {
+    setAgentSummary(summary);
+    setState(prev => {
+      const next = { ...prev, savedAgentSummary: summary };
+      saveToDB(next).catch(console.error);
+      return next;
+    });
+  }, []);
+
+  const switchTab = useCallback((tab: Tab) => {
+    setActiveTab(tab);
+    setState(prev => {
+      const next = { ...prev, savedActiveTab: tab };
+      saveToDB(next).catch(console.error);
+      return next;
+    });
+  }, []);
+
+  // Multi-file import
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    save({ ...state, clips: [...state.clips, { id: Date.now().toString(), name: file.name, url, duration: 0 }], editPlan: undefined, overlays: [] });
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const newClips: Clip[] = files.map(file => {
+      const clipId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      const url = URL.createObjectURL(file);
+      saveFile(clipId, file).catch(console.error);
+      return { id: clipId, name: file.name, url, duration: 0 };
+    });
+    save({ ...state, clips: [...state.clips, ...newClips], editPlan: undefined, overlays: [] });
+    e.target.value = ""; // reset so same file can be re-imported
+  };
+
+  // Drag-and-drop import
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingOver(true);
+  };
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingOver(false);
+  };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingOver(false);
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("video/"));
+    if (files.length === 0) return;
+    const newClips: Clip[] = files.map(file => {
+      const clipId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      const url = URL.createObjectURL(file);
+      saveFile(clipId, file).catch(console.error);
+      return { id: clipId, name: file.name, url, duration: 0 };
+    });
+    save({ ...state, clips: [...state.clips, ...newClips], editPlan: undefined, overlays: [] });
   };
 
   const handleVideoLoad = () => {
@@ -128,14 +235,12 @@ export default function App() {
     return { Authorization: `Bearer ${authToken}` };
   };
 
-  // Jump to segment start on click
   const jumpToSegment = (seg: Segment) => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = seg.src_in;
     setCurrentTime(seg.src_in);
   };
 
-  // Remove a segment from the edit plan
   const removeSegment = (segId: string) => {
     if (!state.editPlan) return;
     const newSegs = state.editPlan.segments.filter(s => s.id !== segId);
@@ -166,16 +271,21 @@ export default function App() {
     save({ ...state, overlays: (state.overlays || []).filter(o => o.id !== id) });
   };
 
+  // AI analysis with step-based progress
   const handleAutoEdit = async () => {
     if (!videoRef.current || !activeClip) return;
     if (agentLoading || exporting) return;
     setAgentLoading(true);
-    setAgentSummary(null);
+    saveAgentSummary(null);
     setAgentProgress([]);
     setExportDone(false);
+    setAgentStartTime(Date.now());
+    setAgentCurrentStep(null);
+    stepTimestampsRef.current = {};
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    const IDLE_MS = 60_000;
+    let timeout = setTimeout(() => controller.abort(), IDLE_MS);
 
     try {
       const frames = await extractFrames(videoRef.current, 10);
@@ -203,6 +313,8 @@ export default function App() {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        clearTimeout(timeout);
+        timeout = setTimeout(() => controller.abort(), IDLE_MS);
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) {
@@ -211,12 +323,19 @@ export default function App() {
             const event = JSON.parse(line);
             if (event.type === "progress") {
               setAgentProgress(prev => [...prev, `[${event.agent}] ${event.message}`]);
+              if (event.agent && event.agent !== "SYSTEM") {
+                const stepKey = event.agent as string;
+                if (!stepTimestampsRef.current[stepKey]) {
+                  stepTimestampsRef.current[stepKey] = Date.now();
+                }
+                setAgentCurrentStep(stepKey);
+              }
             } else if (event.type === "result") {
               data = event;
             } else if (event.type === "error") {
               throw new Error(event.message || event.error);
             }
-          } catch (_parseErr) {
+          } catch {
             try { data = JSON.parse(line); } catch { /* non-JSON line, skip */ }
           }
         }
@@ -241,14 +360,16 @@ export default function App() {
       save({ ...state, inOut: newInOut, editPlan });
 
       const summary = (data.summary as string) || `${segs.length} highlights selected`;
-      setAgentSummary(summary);
+      saveAgentSummary(summary);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
-      setAgentSummary(`Error: ${msg}`);
+      saveAgentSummary(`Error: ${msg}`);
     } finally {
       clearTimeout(timeout);
+      setAgentStartTime(null);
+      setAgentCurrentStep(null);
     }
     setAgentLoading(false);
   };
@@ -269,12 +390,46 @@ export default function App() {
       setExportDone(true);
     } catch (err) {
       console.error(err);
-      setAgentSummary(`Export error: ${err instanceof Error ? err.message : "Unknown"}`);
+      saveAgentSummary(`Export error: ${err instanceof Error ? err.message : "Unknown"}`);
     }
     setExporting(false);
   };
 
-  // Get transition type label
+  // Merge all clips into one
+  const handleMerge = async () => {
+    if (state.clips.length < 2 || exporting) return;
+    setExporting(true);
+    setExportProgress(0);
+    setExportDone(false);
+    try {
+      const formData = new FormData();
+      for (const clip of state.clips) {
+        const resp = await fetch(clip.url);
+        const blob = await resp.blob();
+        formData.append("videos", blob, clip.name);
+      }
+      setExportProgress(30);
+      const res = await fetch(`${API_BASE}/api/merge?name=merged`, {
+        method: "POST",
+        headers: { ...authHeaders() },
+        body: formData,
+      });
+      setExportProgress(80);
+      if (!res.ok) throw new Error(`Merge failed: ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "merged.mp4"; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportProgress(100);
+      setExportDone(true);
+      setToast("Merge complete — download started");
+    } catch (err) {
+      saveAgentSummary(`Merge error: ${err instanceof Error ? err.message : "Unknown"}`);
+    }
+    setExporting(false);
+  };
+
   const getTransLabel = (fromId: string): string => {
     const t = transitions.find(tr => tr.from === fromId);
     if (!t || t.type === "hard_cut") return "CUT";
@@ -283,24 +438,67 @@ export default function App() {
 
   const totalHighlight = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
 
+  // Time estimate for AI analysis
+  const estimateRemaining = (): string | null => {
+    if (!agentCurrentStep || !agentStartTime) return null;
+    const stepIndex = AI_STEPS.indexOf(agentCurrentStep as AIStep);
+    if (stepIndex < 0) return null;
+    const progress = (stepIndex + 1) / AI_STEPS.length;
+    if (progress <= 0) return null;
+    const elapsedMs = Date.now() - agentStartTime;
+    const totalEstMs = elapsedMs / progress;
+    const remainSec = Math.max(0, Math.round((totalEstMs - elapsedMs) / 1000));
+    if (remainSec < 5) return "Almost done...";
+    return `~${Math.ceil(remainSec / 10) * 10}s remaining`;
+  };
+
+  // Current step index for progress display
+  const currentStepIdx = agentCurrentStep ? AI_STEPS.indexOf(agentCurrentStep as AIStep) : -1;
+
   return (
-    <div className="app">
+    <div className={`app ${draggingOver ? "drag-over" : ""}`} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
 
       <aside className="sidebar">
-        <div className="logo">VideoAgent</div>
+        <div className="logo">
+          <span>VideoAgent</span>
+          <button className="theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
+            {theme === "dark" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+            )}
+          </button>
+        </div>
 
         <div className="section-label">Assets</div>
         <label className="import-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Import Video
-          <input type="file" accept="video/*" onChange={handleImport} style={{ display: "none" }} />
+          <input type="file" accept="video/*" multiple onChange={handleImport} style={{ display: "none" }} />
         </label>
 
         <div className="clip-list">
           {state.clips.length === 0
-            ? <div className="empty-clips">No clips yet</div>
-            : state.clips.map((c) => (
-              <div key={c.id} className={`clip-item ${c.id === activeClip?.id ? "active" : ""}`}>
+            ? <div className="empty-clips">No clips imported</div>
+            : state.clips.map((c, idx) => (
+              <div
+                key={c.id}
+                className={`clip-item ${c.id === activeClip?.id ? "active" : ""} ${dragClipIdx !== null && dragClipIdx !== idx ? "drag-over" : ""}`}
+                draggable
+                onDragStart={() => setDragClipIdx(idx)}
+                onDragEnd={() => setDragClipIdx(null)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (dragClipIdx === null || dragClipIdx === idx) return;
+                  const clips = [...state.clips];
+                  const [moved] = clips.splice(dragClipIdx, 1);
+                  clips.splice(idx, 0, moved);
+                  save({ ...state, clips });
+                  setDragClipIdx(null);
+                }}
+              >
                 <span className="clip-name">{c.name}</span>
                 <span className="clip-dur">{fmt(c.duration)}</span>
               </div>
@@ -308,9 +506,14 @@ export default function App() {
           }
         </div>
 
+        {state.clips.length >= 2 && !agentLoading && !exporting && (
+          <button className="merge-btn" onClick={handleMerge}>
+            Merge ({state.clips.length} clips)
+          </button>
+        )}
+
         <div className="spacer" />
 
-        {/* Export section */}
         {activeClip && !exporting && !exportDone && (
           <button className="export-btn" onClick={handleExport} disabled={exporting || agentLoading}>
             Export {segments.length > 0 ? `(${segments.length} segments)` : "Trim"}
@@ -335,7 +538,7 @@ export default function App() {
       <main className="main">
         <div className="preview-area">
           <div className="preview-header">
-            <span className="preview-title">Preview</span>
+            <span className="preview-title">{activeClip?.name || "Preview"}</span>
             <span className="timecode">{fmtDec(currentTime)}</span>
           </div>
 
@@ -351,7 +554,12 @@ export default function App() {
               />
             ) : (
               <div className="empty-video">
-                <div className="empty-text">Import a video to get started</div>
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3 }}>
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <div className="empty-text">Drop a video here or click Import</div>
               </div>
             )}
             {activeClip && (
@@ -376,7 +584,6 @@ export default function App() {
           </div>
           <div className="timeline-track">
             <div className="tl-bg" />
-            {/* Show individual segments if editPlan exists */}
             {segments.length > 0 ? (
               segments.map((seg) => (
                 <div
@@ -399,7 +606,6 @@ export default function App() {
             <div className="tl-head" style={{ left: duration ? `${(currentTime / duration) * 100}%` : "0%" }} />
           </div>
 
-          {/* Segment cards */}
           {segments.length > 0 && (
             <div className="segment-cards">
               {segments.map((seg, i) => (
@@ -422,7 +628,6 @@ export default function App() {
             </div>
           )}
 
-          {/* In/Out controls (when no segments) */}
           {segments.length === 0 && (
             <div className="inout-row">
               <label>
@@ -441,15 +646,13 @@ export default function App() {
       </main>
 
       <aside className="agent-panel">
-        {/* Tab navigation */}
         <div className="panel-tabs">
-          <button className={`panel-tab ${activeTab === "ai" ? "active" : ""}`} onClick={() => setActiveTab("ai")}>AI Agent</button>
-          <button className={`panel-tab ${activeTab === "overlays" ? "active" : ""}`} onClick={() => setActiveTab("overlays")}>Text</button>
-          <button className={`panel-tab ${activeTab === "audio" ? "active" : ""}`} onClick={() => setActiveTab("audio")}>Audio</button>
+          <button className={`panel-tab ${activeTab === "ai" ? "active" : ""}`} onClick={() => switchTab("ai")}>AI Agent</button>
+          <button className={`panel-tab ${activeTab === "overlays" ? "active" : ""}`} onClick={() => switchTab("overlays")}>Text</button>
+          <button className={`panel-tab ${activeTab === "audio" ? "active" : ""}`} onClick={() => switchTab("audio")}>Audio</button>
         </div>
 
         <div className="agent-body">
-          {/* AI Tab */}
           {activeTab === "ai" && (
             <>
               <div className="agent-desc">
@@ -470,14 +673,44 @@ export default function App() {
                 )}
               </button>
 
-              {agentProgress.length > 0 && agentLoading && (
-                <div className="agent-progress">
-                  {agentProgress.map((msg, i) => (
-                    <div key={i} className="agent-progress-item">
-                      <span className="progress-dot" />
-                      <span>{msg}</span>
+              {/* Step-based pipeline progress */}
+              {agentLoading && (
+                <div className="agent-steps">
+                  {AI_STEPS.map((step, stepIdx) => {
+                    const status = stepIdx < currentStepIdx ? "done" : stepIdx === currentStepIdx ? "active" : "pending";
+                    const stepTs = stepTimestampsRef.current[step];
+                    const nextStepTs = stepIdx < AI_STEPS.length - 1 ? stepTimestampsRef.current[AI_STEPS[stepIdx + 1]] : undefined;
+                    return (
+                      <div key={step} className={`agent-step ${status}`}>
+                        <span className="step-indicator">
+                          {status === "done" ? (
+                            <span className="step-check">{"\u2713"}</span>
+                          ) : status === "active" ? (
+                            <span className="spinner" />
+                          ) : (
+                            <span className="step-pending-dot" />
+                          )}
+                        </span>
+                        <span className="step-label">{step.replace(/_/g, " ")}</span>
+                        {status === "done" && stepTs && nextStepTs && (
+                          <span className="step-time">{Math.round((nextStepTs - stepTs) / 1000)}s</span>
+                        )}
+                        {status === "active" && stepTs && (
+                          <span className="step-time">{Math.round((Date.now() - stepTs) / 1000)}s</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="agent-progress-bar">
+                    <div className="progress-bar">
+                      <div className="progress-fill" style={{ width: `${currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0}%` }} />
                     </div>
-                  ))}
+                    <span className="progress-label">{currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0}%</span>
+                  </div>
+                  <div className="agent-time-row">
+                    <span className="agent-elapsed">{fmt(agentElapsed)}</span>
+                    <span className="agent-estimate">{estimateRemaining() || ""}</span>
+                  </div>
                   <div ref={progressEndRef} />
                 </div>
               )}
@@ -491,7 +724,6 @@ export default function App() {
             </>
           )}
 
-          {/* Text Overlay Tab */}
           {activeTab === "overlays" && (
             <>
               <div className="agent-desc">
@@ -556,7 +788,6 @@ export default function App() {
             </>
           )}
 
-          {/* Audio Tab */}
           {activeTab === "audio" && (
             <>
               <div className="agent-desc">
@@ -587,6 +818,7 @@ export default function App() {
         </div>
       </aside>
 
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

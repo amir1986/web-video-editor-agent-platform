@@ -6,7 +6,7 @@ The AI pipeline supports both local LLMs (Ollama) and the Claude API. It analyze
 
 ## Features
 
-- **Web UI** — Import video, preview, AI auto-edit, text overlays, audio volume control, multi-segment timeline, export via server-side ffmpeg
+- **Web UI** — Import video, preview, AI auto-edit, text overlays, audio volume control, multi-segment timeline, export via server-side ffmpeg, light/dark theme, drag-and-drop import, multi-file merge
 - **Auto-Edit API** — Upload a video, get back an AI-edited highlight reel (cuts, transitions, quality-matched output)
 - **Telegram Bot** — Send a video to your bot, receive the edited result (supports files >20MB via MTProto)
 - **Multi-Agent Pipeline** — Cut → Structure → Continuity → Transition → Constraints → Quality Guard
@@ -15,6 +15,11 @@ The AI pipeline supports both local LLMs (Ollama) and the Claude API. It analyze
 - **Token Authentication** — Optional HMAC-based auth with 24-hour token expiry
 - **Text Overlays** — Add timed text overlays with position, size, and color controls; burned into export via ffmpeg drawtext
 - **Audio Controls** — Adjust volume (0–200%), mute, or boost audio for exports
+- **Light/Dark Theme** — Toggle between dark and light mode; preference persists across sessions
+- **Multi-File Merge** — Import multiple videos, drag to reorder, merge into a single output via server-side ffmpeg
+- **Session Persistence** — Video files stored in IndexedDB; full session restored after browser refresh
+- **Step-Based Progress** — AI pipeline shows each agent step with checkmarks, elapsed time, and time estimate
+- **Drag-and-Drop Import** — Drop video files anywhere on the app to import them
 - **SSE Streaming** — Real-time progress events from each pipeline agent via Server-Sent Events
 - **RAG Knowledge Base** — Editing best practices injected into agent prompts for better decisions
 - **Dual LLM Support** — Auto-detects Claude API key; falls back to Ollama for fully local operation
@@ -209,13 +214,16 @@ The Docker image includes ffmpeg, builds the frontend, and serves everything on 
 
 ## Web UI Usage
 
-1. **Import** — Click "Import Video" to load a video file
-2. **Preview** — Play/pause, scrub the timeline, see timecodes
-3. **AI Auto-Edit** — Click "Auto Edit with AI" in the AI Agent tab. The pipeline runs 6 agents in sequence, with real-time progress updates. The resulting segments appear as colored blocks on the timeline.
+1. **Import** — Click "Import Video" or drag-and-drop video files onto the app. Supports multiple files at once.
+2. **Preview** — Play/pause, scrub the timeline, see timecodes. The clip name is shown in the header.
+3. **AI Auto-Edit** — Click "Auto Edit with AI" in the AI Agent tab. A step-by-step pipeline indicator shows each agent (CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY_GUARD) with elapsed time and estimated remaining time. Segments appear on the timeline when complete.
 4. **Edit Segments** — Click a segment to jump to it. Click the X button to remove it. Drag In/Out sliders for manual trim (when no AI segments).
-5. **Text Overlays** — Switch to the "Text" tab. Add overlays with custom text, size, color, position (X/Y), and time range.
-6. **Audio** — Switch to the "Audio" tab. Adjust volume 0-200% with presets (Mute, 50%, 100%, 150%).
-7. **Export** — Click "Export" in the sidebar. The video is sent to the server, rendered with ffmpeg, and downloaded to your browser.
+5. **Multi-File Merge** — Import 2+ videos. Drag clips in the sidebar to reorder. Click "Merge (N clips)" to concatenate them into a single video.
+6. **Text Overlays** — Switch to the "Text" tab. Add overlays with custom text, size, color, position (X/Y), and time range.
+7. **Audio** — Switch to the "Audio" tab. Adjust volume 0-200% with presets (Mute, 50%, 100%, 150%).
+8. **Theme** — Click the sun/moon icon in the sidebar header to toggle between dark and light mode.
+9. **Export** — Click "Export" in the sidebar. The video is sent to the server, rendered with ffmpeg, and downloaded to your browser.
+10. **Session Recovery** — Your session (clips, segments, overlays, settings) is automatically saved. After a browser refresh, everything is restored with a "Session restored" notification.
 
 ## API Endpoints
 
@@ -230,6 +238,7 @@ The Docker image includes ffmpeg, builds the frontend, and serves everything on 
 | `POST` | `/api/auto-edit-stream` | Yes | Same as auto-edit but with SSE progress events |
 | `POST` | `/api/overlay` | Yes | Burn text overlays — send video + `X-Overlays` header |
 | `POST` | `/api/adjust-audio` | Yes | Adjust audio volume — query param `volume` (0-200) |
+| `POST` | `/api/merge` | Yes | Merge multiple videos — multipart upload with `videos` field |
 | `GET` | `/api/health` | No | Health check |
 
 > **Note:** When `AUTH_SECRET` is not set, all endpoints are open (no token needed).
