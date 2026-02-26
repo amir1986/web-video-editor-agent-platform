@@ -17,6 +17,7 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [agentSummary, setAgentSummary] = useState<string | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+  const [agentProgress, setAgentProgress] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportDone, setExportDone] = useState(false);
@@ -73,6 +74,7 @@ export default function App() {
     if (agentLoading || exporting) return;
     setAgentLoading(true);
     setAgentSummary(null);
+    setAgentProgress([]);
     setExportDone(false);
 
     const controller = new AbortController();
@@ -82,6 +84,8 @@ export default function App() {
       const frames = await extractFrames(videoRef.current, 10);
       const width = videoRef.current.videoWidth || 0;
       const height = videoRef.current.videoHeight || 0;
+
+      // Streaming NDJSON — read progress events in real-time
       const res = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -94,20 +98,57 @@ export default function App() {
         throw new Error(`Server error ${res.status}: ${errText}`);
       }
 
-      const data = await res.json();
+      // Read NDJSON stream line by line for live progress
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let data: Record<string, unknown> | null = null;
 
-      // Parse the new EditPlan schema (segments array + transitions)
-      const editPlan: EditPlan | undefined = data?.editPlan;
-      const segs = editPlan?.segments || data?.segments || [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "progress") {
+              setAgentProgress(prev => [...prev, `[${event.agent}] ${event.message}`]);
+            } else if (event.type === "result") {
+              data = event;
+            } else if (event.type === "error") {
+              throw new Error(event.message || event.error);
+            }
+          } catch (parseErr) {
+            // Try parsing the whole buffer as plain JSON (fallback for non-streaming)
+            try { data = JSON.parse(line); } catch {}
+          }
+        }
+      }
+      // Handle any remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          if (event.type === "result") data = event;
+          else if (!data) data = event;
+        } catch {}
+      }
+
+      if (!data) throw new Error("No result received from server");
+
+      // Parse the EditPlan from the streamed result
+      const editPlan: EditPlan | undefined = (data.editPlan as EditPlan) || undefined;
+      const segs = editPlan?.segments || (data.segments as EditPlan["segments"]) || [];
 
       let newInOut = state.inOut;
       if (segs.length > 0) {
-        // Use first/last segment bounds for the UI in/out display
         newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
       }
       save({ ...state, inOut: newInOut, editPlan });
 
-      const summary = data?.summary || `${segs.length} highlights selected`;
+      const summary = (data.summary as string) || `${segs.length} highlights selected`;
       setAgentSummary(summary);
 
       // Export: use multi-segment auto-edit if we have an editPlan
@@ -245,12 +286,12 @@ export default function App() {
         <div className="agent-header">
           <span className="pulse" />
           <span>AI Agent</span>
-          <span className="agent-model">qwen-vision</span>
+          <span className="agent-model">multi-agent</span>
         </div>
 
         <div className="agent-body">
           <div className="agent-desc">
-            Qwen will analyze your video frames and automatically find the best highlight moment, then download it.
+            AI agents will analyze your video frames and automatically find the best highlights, then download the result.
           </div>
 
           <button
@@ -263,9 +304,20 @@ export default function App() {
             ) : exporting ? (
               <><span className="spinner" /> Exporting {exportProgress}%...</>
             ) : (
-              <><span></span> Auto Edit with Vision</>
+              <><span></span> Auto Edit with AI</>
             )}
           </button>
+
+          {agentProgress.length > 0 && agentLoading && (
+            <div className="agent-progress">
+              {agentProgress.map((msg, i) => (
+                <div key={i} className="agent-progress-item">
+                  <span className="progress-dot" />
+                  <span>{msg}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {agentSummary && (
             <div className="agent-result">
