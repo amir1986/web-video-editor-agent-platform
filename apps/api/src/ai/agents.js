@@ -351,7 +351,7 @@ function runQualityGuardAgent(videoMeta, editPlan, sourceQuality) {
     crf: srcVideoBitrate > 0 ? null : 18,  // Only use CRF as fallback when bitrate unknown
     source_video_bitrate: srcVideoBitrate,  // Preferred: match source bitrate exactly
     source_audio_bitrate: srcAudioBitrate,
-    preset: "medium",       // Good quality/speed tradeoff; never "ultrafast" or "veryfast"
+    preset: "fast",         // Good quality/speed tradeoff; never "ultrafast" or "veryfast"
     max_bitrate: null,      // No artificial cap
     pixel_format: "yuv420p",
     // Frame rate from source
@@ -368,7 +368,7 @@ function runQualityGuardAgent(videoMeta, editPlan, sourceQuality) {
   }
   if (rc.preset && ["ultrafast", "superfast", "veryfast"].includes(rc.preset)) {
     exportSettingsOk = false;
-    requiredFixes.push(`Preset "${rc.preset}" causes visible quality degradation — correcting to "medium"`);
+    requiredFixes.push(`Preset "${rc.preset}" causes visible quality degradation — correcting to "fast"`);
   }
   if (rc.max_bitrate && rc.max_bitrate < 5000) {
     exportSettingsOk = false;
