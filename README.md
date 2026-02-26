@@ -16,12 +16,14 @@ The AI pipeline uses local LLMs (Ollama) to analyze video frames and produce an 
 ## Architecture
 
 ```
-apps/web          React + TypeScript + Vite (browser UI)
-apps/api          Express.js API gateway + ffmpeg orchestration
-  src/index.js      API server (trim, auto-edit, analyze endpoints)
-  src/bot.js        Telegram bot (polling mode)
-  src/ai/agents.js  Multi-agent LLM pipeline
-packages/core     Shared TypeScript types and timeline operations
+apps/web            React + TypeScript + Vite (browser UI)
+apps/api            Express.js API gateway + ffmpeg orchestration
+  src/index.js        API server (trim, auto-edit, analyze endpoints)
+  src/bot.js          Telegram bot (polling mode)
+  src/ai/agents.js    Multi-agent LLM pipeline
+packages/core       Shared TypeScript types and timeline operations
+.github/workflows   GitHub Actions (AI PR review, conflict resolver, auto-commit)
+.github/scripts     Python scripts for Claude API integration
 ```
 
 ## Prerequisites
@@ -200,6 +202,46 @@ Ollama must be running on `http://localhost:11434` (the default).
 | `npm run build` | Root | Build the web UI for production |
 | `npm run lint` | Root | Lint the web UI |
 | `npm run typecheck` | Root | Type-check the web UI |
+
+## GitHub AI Automation
+
+This repository includes GitHub Actions workflows powered by the Claude API that automate code review, conflict resolution, and on-demand AI tasks.
+
+### Workflows
+
+| Workflow | Trigger | File | Description |
+|---|---|---|---|
+| **AI PR Review** | PR opened / updated | `.github/workflows/pr-review.yml` | Fetches the PR diff, sends it to Claude, and posts a review comment with security, error-handling, test, and quality feedback |
+| **Merge Conflict Resolver** | PR opened / updated | `.github/workflows/merge-conflict.yml` | Detects merge conflicts with `main`, asks Claude for resolution suggestions, and posts them as a PR comment |
+| **Auto Commit Task** | `/ai-run` comment on an issue | `.github/workflows/auto-commit.yml` | Parses the comment, asks Claude to generate files, commits and pushes the result |
+
+### Setup
+
+1. **Add your Claude API key** to GitHub Secrets:
+   - Go to **Settings → Secrets and variables → Actions → New repository secret**
+   - Name: `ANTHROPIC_API_KEY`, Value: your key from [console.anthropic.com](https://console.anthropic.com)
+
+2. **(Optional) Add notification webhooks** for Slack or Discord:
+   - `SLACK_WEBHOOK_URL` — Slack incoming webhook URL
+   - `DISCORD_WEBHOOK_URL` — Discord webhook URL
+
+### Usage
+
+- **PR Reviews** happen automatically — open or push to a PR and Claude will comment within a couple of minutes.
+- **Conflict Resolution** is automatic — if a PR has merge conflicts with `main`, Claude posts suggested resolutions.
+- **On-Demand Tasks** — comment `/ai-run <instruction>` on any issue, e.g.:
+  ```
+  /ai-run Create a blog post about Python tips and save it to blog/python-tips.md
+  ```
+  Claude will generate the file, commit, and push it.
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `.github/scripts/review_pr.py` | Fetches diff, calls Claude API, posts review comment |
+| `.github/scripts/resolve_conflict.py` | Reads conflict markers, calls Claude API, posts suggestion |
+| `.github/scripts/run_task.py` | Parses `/ai-run` instruction, generates files via Claude |
 
 ## License
 
