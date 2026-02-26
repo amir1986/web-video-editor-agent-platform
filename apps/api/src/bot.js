@@ -220,11 +220,15 @@ bot.on("video", async (msg) => {
 
     console.log(`[VIDEO] Sending to API: ${API_URL}/api/auto-edit, size=${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB`);
     const apiStart = Date.now();
+    const fetchCtrl = new AbortController();
+    const fetchTimeout = setTimeout(() => fetchCtrl.abort(), 10 * 60 * 1000); // 10 min
     const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
+      signal: fetchCtrl.signal,
     });
+    clearTimeout(fetchTimeout);
 
     const apiElapsed = ((Date.now() - apiStart) / 1000).toFixed(1);
     console.log(`[VIDEO] API response: status=${res.status} in ${apiElapsed}s`);
@@ -332,11 +336,15 @@ bot.on("document", async (msg) => {
 
     console.log(`[DOC] Sending to API: ${API_URL}/api/auto-edit, size=${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB`);
     const apiStart = Date.now();
+    const fetchCtrl2 = new AbortController();
+    const fetchTimeout2 = setTimeout(() => fetchCtrl2.abort(), 10 * 60 * 1000); // 10 min
     const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
+      signal: fetchCtrl2.signal,
     });
+    clearTimeout(fetchTimeout2);
 
     const apiElapsed = ((Date.now() - apiStart) / 1000).toFixed(1);
     console.log(`[DOC] API response: status=${res.status} in ${apiElapsed}s`);
