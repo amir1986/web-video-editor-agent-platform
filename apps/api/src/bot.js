@@ -7,7 +7,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
-const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu";
+const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {

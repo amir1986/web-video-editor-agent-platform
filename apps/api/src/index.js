@@ -6,7 +6,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
-const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu";
+const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
