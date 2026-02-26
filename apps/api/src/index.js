@@ -214,15 +214,15 @@ function buildSourceMatchEncodingArgs(sourceQuality, rc) {
   const vArgs = [];
   const aArgs = [];
 
-  // Video encoding — match source bitrate when known, fallback to CRF 18
+  // Video encoding — CRF 18 (visually lossless) capped at source bitrate
   vArgs.push("-c:v", rc?.codec || "libx264");
   if (sourceQuality?.video?.bitrate > 0) {
     const vbr = String(sourceQuality.video.bitrate);
-    vArgs.push("-b:v", vbr, "-maxrate", vbr, "-bufsize", String(sourceQuality.video.bitrate * 2));
+    vArgs.push("-crf", String(rc?.crf || 18), "-maxrate", vbr, "-bufsize", String(sourceQuality.video.bitrate * 2));
   } else {
     vArgs.push("-crf", String(rc?.crf || 18));
   }
-  vArgs.push("-preset", rc?.preset || "fast");
+  vArgs.push("-preset", rc?.preset || "medium");
   vArgs.push("-pix_fmt", rc?.pixel_format || "yuv420p");
 
   // Preserve resolution explicitly
@@ -413,12 +413,19 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
           if (skipFlags.has(srcVideoArgs[j])) { j++; continue; } // skip flag and its value
           cleanVideoArgs.push(srcVideoArgs[j]);
         }
-        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex", filterComplex, ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
+        // Write filter_complex to a script file to avoid shell escaping issues.
+        // WSL passes args through bash, which interprets semicolons as command
+        // separators — using -filter_complex_script bypasses this entirely.
+        const filterScriptPath = path.join(tmpDir, "filter.txt");
+        fs.writeFileSync(filterScriptPath, filterComplex);
+        console.log(`[RENDER] Filter script: ${filterComplex}`);
+        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex_script", toWslPath(filterScriptPath), ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
       } catch (filterErr) {
-        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to stream copy concat`);
+        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to re-encode concat`);
         const concatFile = path.join(tmpDir, "concat.txt");
         fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
+        // Re-encode fallback: use source-matched quality to preserve dimensions and bitrate
+        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
       }
     } else {
       const concatFile = path.join(tmpDir, "concat.txt");
@@ -551,6 +558,9 @@ app.post("/api/auto-edit", express.raw({ type: "*/*", limit: "2gb" }), async (re
     res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
     res.set("X-AI-Summary", summary);
     res.set("X-Segments-Count", String(segments.length));
+    res.set("X-Video-Width", String(videoMeta.width));
+    res.set("X-Video-Height", String(videoMeta.height));
+    res.set("X-Video-Duration", String(Math.round(finalDuration)));
     res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
   } catch (err) {
     cleanup(tmpIn, tmpOut);
