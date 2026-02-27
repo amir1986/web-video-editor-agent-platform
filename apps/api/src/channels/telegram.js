@@ -82,7 +82,6 @@ class TelegramChannel extends BaseChannel {
     try {
       const file = await ctx.api.getFile(fileId);
       const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
-      const fetch = (await import("node-fetch")).default;
       const resp = await fetch(fileUrl);
       const buffer = Buffer.from(await resp.arrayBuffer());
       fs.writeFileSync(destPath, buffer);
