@@ -48,6 +48,22 @@ following rules MUST be followed:
    `package.json` to force modern versions of transitive dependencies where
    possible.
 
+## README Maintenance Rule (MANDATORY)
+
+**Every time** a change affects user-facing functionality, the README.md MUST
+be updated to reflect the current state. This includes:
+
+1. **New scripts** — Add to the "Available Scripts" table.
+2. **New API endpoints** — Add to the "API" table.
+3. **New channels/integrations** — Update the "Messaging Channels" section.
+4. **Dependency changes** — If a major library is replaced (e.g.,
+   `node-telegram-bot-api` → `grammy`), update the "Tech Stack" table.
+5. **New tools/config** — Update "Project Structure" and any relevant sections.
+
+The README is for **usage-driven documentation only** — it should tell users
+how to install, configure, run, and use the project. Do not add implementation
+details, internal architecture notes, or contributor guidelines to the README.
+
 ## Code Style
 
 - TypeScript for web app (React + Vite)

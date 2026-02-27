@@ -118,16 +118,31 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
     onProgress("Processing with AI... this may take a minute.");
 
     const videoBuffer = fs.readFileSync(inputPath);
-    const fetchCtrl = new AbortController();
-    const fetchTimeout = setTimeout(() => fetchCtrl.abort(), 10 * 60 * 1000);
+    const url = `${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`;
 
-    const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`, {
-      method: "POST",
-      headers: { "Content-Type": "video/mp4" },
-      body: videoBuffer,
-      signal: fetchCtrl.signal,
-    });
-    clearTimeout(fetchTimeout);
+    let res;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const fetchCtrl = new AbortController();
+      const fetchTimeout = setTimeout(() => fetchCtrl.abort(), 10 * 60 * 1000);
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "video/mp4" },
+          body: videoBuffer,
+          signal: fetchCtrl.signal,
+        });
+        clearTimeout(fetchTimeout);
+        break;
+      } catch (fetchErr) {
+        clearTimeout(fetchTimeout);
+        if (attempt < 3 && (fetchErr.cause?.code === "ECONNRESET" || fetchErr.cause?.code === "ECONNREFUSED")) {
+          console.log(`[PROCESS] API connection failed (${fetchErr.cause.code}), retrying in ${attempt * 2}s... (${attempt}/3)`);
+          await new Promise(r => setTimeout(r, attempt * 2000));
+          continue;
+        }
+        throw fetchErr;
+      }
+    }
 
     if (!res.ok) {
       const err = await res.text();
