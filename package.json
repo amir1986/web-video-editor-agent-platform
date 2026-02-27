@@ -15,7 +15,10 @@
     "build": "npm run build --workspace=apps/web",
     "lint": "npm run lint --workspace=apps/web --if-present",
     "typecheck": "npm run typecheck --workspace=apps/web --if-present",
-    "test": "npm run test --workspace=apps/api"
+    "test": "npm run test --workspace=apps/api",
+    "check-deps": "node scripts/check-deps.js",
+    "check-deps:full": "node scripts/check-deps.js --audit",
+    "preinstall": "node -e \"try{require('./scripts/check-deps.js')}catch{}\" 2>/dev/null || true"
   },
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",
