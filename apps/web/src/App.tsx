@@ -3,6 +3,31 @@ import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB, saveFile, loadFile } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
 import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
+import {
+  Upload,
+  Sun,
+  Moon,
+  Play,
+  Pause,
+  Sparkles,
+  Download,
+  Merge,
+  Type,
+  Volume2,
+  Bot,
+  Plus,
+  X,
+  Check,
+  Loader2,
+  Film,
+  AlertCircle,
+  RotateCcw,
+} from "lucide-react";
 preloadFFmpeg().catch(console.error);
 
 // ---------------------------------------------------------------------------
@@ -69,6 +94,7 @@ export default function App() {
   // Theme
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
 
@@ -99,14 +125,12 @@ export default function App() {
       if (!restored.overlays) restored.overlays = [];
       if (restored.volume == null) restored.volume = 100;
 
-      // Restore files from IndexedDB
       const restoredClips: Clip[] = [];
       for (const clip of restored.clips) {
         const file = await loadFile(clip.id).catch(() => null);
         if (file) {
           restoredClips.push({ ...clip, url: URL.createObjectURL(file) });
         }
-        // If no file in IndexedDB, skip (blob URLs don't survive refresh)
       }
       restored.clips = restoredClips;
 
@@ -121,7 +145,6 @@ export default function App() {
 
       if (restoredClips.length > 0) {
         if (restored.wasAnalyzing) {
-          // Analysis was interrupted by refresh
           setSessionResumeNeeded(true);
           setActiveTab("ai");
           setToast("Session restored — AI analysis was interrupted");
@@ -134,7 +157,7 @@ export default function App() {
     }).catch(console.error);
   }, []);
 
-  // Auto-login (auth is transparent when disabled on server)
+  // Auto-login
   useEffect(() => {
     fetch(`${API_BASE}/api/auth/login`, {
       method: "POST",
@@ -151,7 +174,6 @@ export default function App() {
     saveToDB(newState).catch(console.error);
   }, []);
 
-  // Persist agentSummary and activeTab changes
   const saveAgentSummary = useCallback((summary: string | null) => {
     setAgentSummary(summary);
     setState(prev => {
@@ -170,7 +192,6 @@ export default function App() {
     });
   }, []);
 
-  // Multi-file import
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
@@ -181,24 +202,13 @@ export default function App() {
       return { id: clipId, name: file.name, url, duration: 0 };
     });
     save({ ...state, clips: [...state.clips, ...newClips], editPlan: undefined, overlays: [] });
-    e.target.value = ""; // reset so same file can be re-imported
+    e.target.value = "";
   };
 
-  // Drag-and-drop import
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingOver(true);
-  };
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingOver(false);
-  };
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDraggingOver(true); };
+  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDraggingOver(false); };
   const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingOver(false);
+    e.preventDefault(); e.stopPropagation(); setDraggingOver(false);
     const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("video/"));
     if (files.length === 0) return;
     const newClips: Clip[] = files.map(file => {
@@ -259,7 +269,6 @@ export default function App() {
     save({ ...state, editPlan: { ...state.editPlan, segments: newSegs, transitions: newTrans } });
   };
 
-  // Text overlay management
   const addOverlay = () => {
     const overlay: TextOverlay = {
       id: Date.now().toString(),
@@ -282,7 +291,6 @@ export default function App() {
     save({ ...state, overlays: (state.overlays || []).filter(o => o.id !== id) });
   };
 
-  // AI analysis with step-based progress
   const handleAutoEdit = async () => {
     if (!videoRef.current || !activeClip) return;
     if (agentLoading || exporting) return;
@@ -295,7 +303,6 @@ export default function App() {
     setSessionResumeNeeded(false);
     stepTimestampsRef.current = {};
 
-    // Mark that analysis is in progress (for refresh recovery)
     setState(prev => {
       const next = { ...prev, wasAnalyzing: true };
       saveToDB(next).catch(console.error);
@@ -355,7 +362,7 @@ export default function App() {
               throw new Error(event.message || event.error);
             }
           } catch {
-            try { data = JSON.parse(line); } catch { /* non-JSON line, skip */ }
+            try { data = JSON.parse(line); } catch { /* non-JSON line */ }
           }
         }
       }
@@ -364,7 +371,7 @@ export default function App() {
           const event = JSON.parse(buffer);
           if (event.type === "result") data = event;
           else if (!data) data = event;
-        } catch { /* ignore trailing non-JSON */ }
+        } catch { /* trailing non-JSON */ }
       }
 
       if (!data) throw new Error("No result received from server");
@@ -389,7 +396,6 @@ export default function App() {
       clearTimeout(timeout);
       setAgentStartTime(null);
       setAgentCurrentStep(null);
-      // Clear wasAnalyzing flag
       setState(prev => {
         const next = { ...prev, wasAnalyzing: false };
         saveToDB(next).catch(console.error);
@@ -420,7 +426,6 @@ export default function App() {
     setExporting(false);
   };
 
-  // Merge all clips into one
   const handleMerge = async () => {
     if (state.clips.length < 2 || exporting) return;
     setExporting(true);
@@ -463,7 +468,6 @@ export default function App() {
 
   const totalHighlight = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
 
-  // Time estimate for AI analysis
   const estimateRemaining = (): string | null => {
     if (!agentCurrentStep || !agentStartTime) return null;
     const stepIndex = AI_STEPS.indexOf(agentCurrentStep as AIStep);
@@ -477,97 +481,139 @@ export default function App() {
     return `~${Math.ceil(remainSec / 10) * 10}s remaining`;
   };
 
-  // Current step index for progress display
   const currentStepIdx = agentCurrentStep ? AI_STEPS.indexOf(agentCurrentStep as AIStep) : -1;
 
+  const tabItems: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: "ai", label: "AI Agent", icon: <Bot className="w-3.5 h-3.5" /> },
+    { id: "overlays", label: "Text", icon: <Type className="w-3.5 h-3.5" /> },
+    { id: "audio", label: "Audio", icon: <Volume2 className="w-3.5 h-3.5" /> },
+  ];
+
   return (
-    <div className={`app ${draggingOver ? "drag-over" : ""}`} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
-
-      <aside className="sidebar">
-        <div className="logo">
-          <span>VideoAgent</span>
-          <button className="theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
-            {theme === "dark" ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
-            )}
-          </button>
-        </div>
-
-        <div className="section-label">Assets</div>
-        <label className="import-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Import Video
-          <input type="file" accept="video/*" multiple onChange={handleImport} style={{ display: "none" }} />
-        </label>
-
-        <div className="clip-list">
-          {state.clips.length === 0
-            ? <div className="empty-clips">No clips imported</div>
-            : state.clips.map((c, idx) => (
-              <div
-                key={c.id}
-                className={`clip-item ${c.id === activeClip?.id ? "active" : ""} ${dragClipIdx !== null && dragClipIdx !== idx ? "drag-over" : ""}`}
-                draggable
-                onDragStart={() => setDragClipIdx(idx)}
-                onDragEnd={() => setDragClipIdx(null)}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (dragClipIdx === null || dragClipIdx === idx) return;
-                  const clips = [...state.clips];
-                  const [moved] = clips.splice(dragClipIdx, 1);
-                  clips.splice(idx, 0, moved);
-                  save({ ...state, clips });
-                  setDragClipIdx(null);
-                }}
-              >
-                <span className="clip-name">{c.name}</span>
-                <span className="clip-dur">{fmt(c.duration)}</span>
-              </div>
-            ))
-          }
-        </div>
-
-        {state.clips.length >= 2 && !agentLoading && !exporting && (
-          <button className="merge-btn" onClick={handleMerge}>
-            Merge ({state.clips.length} clips)
-          </button>
-        )}
-
-        <div className="spacer" />
-
-        {activeClip && !exporting && !exportDone && (
-          <button className="export-btn" onClick={handleExport} disabled={exporting || agentLoading}>
-            Export {segments.length > 0 ? `(${segments.length} segments)` : "Trim"}
-          </button>
-        )}
-
-        {exporting && (
-          <div className="export-box">
-            <div className="section-label">Exporting...</div>
-            <div className="progress-wrap">
-              <div className="progress-bar"><div className="progress-fill" style={{ width: `${exportProgress}%` }} /></div>
-              <div className="progress-label">{exportProgress}%</div>
+    <div
+      className={cn("grid h-screen grid-cols-[240px_1fr_300px] overflow-hidden", draggingOver && "ring-2 ring-primary ring-inset")}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* ─── SIDEBAR ─── */}
+      <aside className="flex flex-col bg-card border-r border-border">
+        {/* Logo */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center">
+              <Film className="w-4 h-4 text-primary-foreground" />
             </div>
+            <span className="text-sm font-bold tracking-tight">VideoAgent</span>
           </div>
-        )}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
+            className="h-7 w-7 text-muted-foreground"
+          >
+            {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </Button>
+        </div>
 
-        {exportDone && !exporting && (
-          <div className="export-done-box">Download started!</div>
-        )}
+        {/* Assets */}
+        <div className="flex-1 flex flex-col gap-2 p-4 overflow-y-auto">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1">Assets</span>
+          <label className="cursor-pointer">
+            <span className="inline-flex items-center justify-center gap-2 w-full h-8 rounded-md text-xs font-medium bg-primary text-primary-foreground shadow-md hover:brightness-110 transition-all active:scale-[0.98] px-3">
+              <Upload className="w-3.5 h-3.5" />
+              Import Video
+            </span>
+            <input type="file" accept="video/*" multiple onChange={handleImport} className="hidden" />
+          </label>
+
+          <div className="flex flex-col gap-1.5 mt-1">
+            {state.clips.length === 0 ? (
+              <p className="text-xs text-muted-foreground px-2 py-3">No clips imported</p>
+            ) : (
+              state.clips.map((c, idx) => (
+                <div
+                  key={c.id}
+                  className={cn(
+                    "flex items-center gap-2.5 px-3 py-2 rounded-lg border border-transparent cursor-pointer transition-all duration-150 group hover:bg-accent/10 hover:border-border",
+                    c.id === activeClip?.id && "bg-accent/10 border-primary/30 shadow-sm",
+                    dragClipIdx !== null && dragClipIdx !== idx && "border-dashed border-border"
+                  )}
+                  draggable
+                  onDragStart={() => setDragClipIdx(idx)}
+                  onDragEnd={() => setDragClipIdx(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    if (dragClipIdx === null || dragClipIdx === idx) return;
+                    const clips = [...state.clips];
+                    const [moved] = clips.splice(dragClipIdx, 1);
+                    clips.splice(idx, 0, moved);
+                    save({ ...state, clips });
+                    setDragClipIdx(null);
+                  }}
+                >
+                  <Film className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                  <span className="flex-1 text-xs text-foreground truncate">{c.name}</span>
+                  <span className="text-[10px] font-mono text-muted-foreground flex-shrink-0">{fmt(c.duration)}</span>
+                </div>
+              ))
+            )}
+          </div>
+
+          {state.clips.length >= 2 && !agentLoading && !exporting && (
+            <Button variant="outline" size="sm" className="w-full gap-2 mt-1" onClick={handleMerge}>
+              <Merge className="w-3.5 h-3.5" />
+              Merge ({state.clips.length} clips)
+            </Button>
+          )}
+
+          <div className="flex-1" />
+
+          {activeClip && !exporting && !exportDone && (
+            <Button
+              variant="success"
+              size="lg"
+              className="w-full gap-2"
+              onClick={handleExport}
+              disabled={exporting || agentLoading}
+            >
+              <Download className="w-4 h-4" />
+              Export {segments.length > 0 ? `(${segments.length} segments)` : "Trim"}
+            </Button>
+          )}
+
+          {exporting && (
+            <div className="flex flex-col gap-2 p-3 rounded-lg bg-secondary border border-border">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Exporting...</span>
+              <Progress value={exportProgress} />
+              <span className="text-xs text-muted-foreground text-center">{exportProgress}%</span>
+            </div>
+          )}
+
+          {exportDone && !exporting && (
+            <div className="flex items-center gap-2 p-3 rounded-lg border border-success/30 bg-success/10 text-success text-sm font-medium">
+              <Check className="w-4 h-4" />
+              Download started!
+            </div>
+          )}
+        </div>
       </aside>
 
-      <main className="main">
-        <div className="preview-area">
-          <div className="preview-header">
-            <span className="preview-title">{activeClip?.name || "Preview"}</span>
-            <span className="timecode">{fmtDec(currentTime)}</span>
+      {/* ─── MAIN AREA ─── */}
+      <main className="flex flex-col bg-background overflow-hidden">
+        {/* Preview */}
+        <div className="flex-1 flex flex-col p-5 gap-3 min-h-0">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground truncate max-w-[60%]">
+              {activeClip?.name || "Preview"}
+            </span>
+            <Badge variant="accent" className="font-mono text-[11px]">
+              {fmtDec(currentTime)}
+            </Badge>
           </div>
 
-          <div className="video-wrap">
+          <div className="relative flex-1 min-h-0 bg-black rounded-xl overflow-hidden border border-border shadow-lg group">
             {activeClip ? (
               <video
                 ref={videoRef}
@@ -576,44 +622,54 @@ export default function App() {
                 onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
                 onEnded={() => setPlaying(false)}
                 onClick={togglePlay}
+                className="w-full h-full object-contain"
               />
             ) : (
-              <div className="empty-video">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3 }}>
-                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-                  <polyline points="17 8 12 3 7 8"/>
-                  <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                <div className="empty-text">Drop a video here or click Import</div>
+              <div className={cn(
+                "flex flex-col items-center justify-center gap-4 w-full h-full border-2 border-dashed border-border rounded-xl transition-all duration-200 p-10",
+                draggingOver && "border-primary bg-primary/5"
+              )}>
+                <Upload className="w-12 h-12 text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground">Drop a video here or click Import</p>
               </div>
             )}
             {activeClip && (
-              <button className="play-overlay" onClick={togglePlay}>
-                {playing ? "\u23F8" : "\u25B6"}
+              <button
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-primary/80 hover:scale-110"
+                onClick={togglePlay}
+              >
+                {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
               </button>
             )}
           </div>
 
-          <div className="scrubber-row">
-            <input type="range" className="scrubber" min={0} max={duration} step={0.05} value={currentTime}
-              onChange={e => { const t = parseFloat(e.target.value); if (videoRef.current) videoRef.current.currentTime = t; setCurrentTime(t); }} />
-          </div>
+          <Slider
+            min={0}
+            max={duration}
+            step={0.05}
+            value={currentTime}
+            onValueChange={(v) => {
+              if (videoRef.current) videoRef.current.currentTime = v;
+              setCurrentTime(v);
+            }}
+          />
         </div>
 
-        {/* Timeline with segment visualization */}
-        <div className="timeline-area">
-          <div className="timeline-header">
-            <span className="tl-label">In <strong>{fmtDec(state.inOut.in)}</strong></span>
-            <span className="tl-dur">{fmt(state.inOut.out - state.inOut.in)}</span>
-            <span className="tl-label">Out <strong>{fmtDec(state.inOut.out)}</strong></span>
+        {/* Timeline */}
+        <div className="bg-card border-t border-border px-5 py-4 flex flex-col gap-3 min-h-[100px] max-h-[220px] overflow-y-auto">
+          <div className="flex justify-between items-center text-xs text-muted-foreground">
+            <span>In <strong className="text-primary font-mono">{fmtDec(state.inOut.in)}</strong></span>
+            <span className="font-mono text-muted-foreground">{fmt(state.inOut.out - state.inOut.in)}</span>
+            <span>Out <strong className="text-primary font-mono">{fmtDec(state.inOut.out)}</strong></span>
           </div>
-          <div className="timeline-track">
-            <div className="tl-bg" />
+
+          <div className="relative h-9 rounded-lg overflow-hidden">
+            <div className="absolute inset-0 bg-secondary" />
             {segments.length > 0 ? (
               segments.map((seg) => (
                 <div
                   key={seg.id}
-                  className="tl-segment"
+                  className="absolute top-0 h-full bg-primary/25 border-l-2 border-r-2 border-primary cursor-pointer hover:bg-primary/40 transition-colors min-w-[2px]"
                   title={`${seg.id}: ${fmtDec(seg.src_in)} - ${fmtDec(seg.src_out)}`}
                   style={{
                     left: duration ? `${(seg.src_in / duration) * 100}%` : "0%",
@@ -623,199 +679,292 @@ export default function App() {
                 />
               ))
             ) : (
-              <div className="tl-range" style={{
-                left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
-                width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%"
-              }} />
+              <div
+                className="absolute top-0 h-full bg-primary/20 border-l-2 border-r-2 border-primary"
+                style={{
+                  left: duration ? `${(state.inOut.in / duration) * 100}%` : "0%",
+                  width: duration ? `${((state.inOut.out - state.inOut.in) / duration) * 100}%` : "100%",
+                }}
+              />
             )}
-            <div className="tl-head" style={{ left: duration ? `${(currentTime / duration) * 100}%` : "0%" }} />
+            <div
+              className="absolute top-0 h-full w-0.5 bg-white/80 shadow-[0_0_8px_rgba(255,255,255,0.5)] z-10 pointer-events-none"
+              style={{ left: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
+            />
           </div>
 
           {segments.length > 0 && (
-            <div className="segment-cards">
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
               {segments.map((seg, i) => (
                 <React.Fragment key={seg.id}>
                   <div
-                    className={`seg-card ${currentTime >= seg.src_in && currentTime <= seg.src_out ? "active" : ""}`}
+                    className={cn(
+                      "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border bg-secondary text-[10px] cursor-pointer transition-all hover:border-primary/50",
+                      currentTime >= seg.src_in && currentTime <= seg.src_out && "border-primary/50 bg-primary/10 shadow-sm"
+                    )}
                     onClick={() => jumpToSegment(seg)}
                   >
-                    <span className="seg-id">{seg.id}</span>
-                    <span className="seg-time">{fmtDec(seg.src_in)} - {fmtDec(seg.src_out)}</span>
-                    <span className="seg-dur">{(seg.src_out - seg.src_in).toFixed(1)}s</span>
-                    <button className="seg-remove" onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); }} title="Remove segment">&times;</button>
+                    <span className="font-bold text-primary uppercase">{seg.id}</span>
+                    <span className="font-mono text-muted-foreground">{fmtDec(seg.src_in)} - {fmtDec(seg.src_out)}</span>
+                    <Badge variant="success" className="text-[9px] px-1.5 py-0">{(seg.src_out - seg.src_in).toFixed(1)}s</Badge>
+                    <button
+                      className="ml-0.5 text-muted-foreground hover:text-destructive transition-colors"
+                      onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); }}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
                   </div>
                   {i < segments.length - 1 && (
-                    <span className="seg-transition">{getTransLabel(seg.id)}</span>
+                    <Badge variant="warning" className="text-[9px] px-1.5 py-0">{getTransLabel(seg.id)}</Badge>
                   )}
                 </React.Fragment>
               ))}
-              <div className="seg-total">Total: {totalHighlight.toFixed(1)}s ({duration ? Math.round(totalHighlight / duration * 100) : 0}%)</div>
+              <div className="w-full text-[10px] font-mono text-muted-foreground pt-2 mt-1 border-t border-border">
+                Total: {totalHighlight.toFixed(1)}s ({duration ? Math.round(totalHighlight / duration * 100) : 0}%)
+              </div>
             </div>
           )}
 
           {segments.length === 0 && (
-            <div className="inout-row">
-              <label>
+            <div className="flex gap-4">
+              <label className="flex-1 flex items-center gap-2 text-xs text-muted-foreground">
                 <span>In</span>
-                <input type="range" min={0} max={duration} step={0.05} value={state.inOut.in}
-                  onChange={e => save({ ...state, inOut: { ...state.inOut, in: parseFloat(e.target.value) } })} />
+                <Slider
+                  className="flex-1"
+                  min={0}
+                  max={duration}
+                  step={0.05}
+                  value={state.inOut.in}
+                  onValueChange={(v) => save({ ...state, inOut: { ...state.inOut, in: v } })}
+                />
               </label>
-              <label>
+              <label className="flex-1 flex items-center gap-2 text-xs text-muted-foreground">
                 <span>Out</span>
-                <input type="range" min={0} max={duration} step={0.05} value={state.inOut.out}
-                  onChange={e => save({ ...state, inOut: { ...state.inOut, out: parseFloat(e.target.value) } })} />
+                <Slider
+                  className="flex-1"
+                  min={0}
+                  max={duration}
+                  step={0.05}
+                  value={state.inOut.out}
+                  onValueChange={(v) => save({ ...state, inOut: { ...state.inOut, out: v } })}
+                />
               </label>
             </div>
           )}
         </div>
       </main>
 
-      <aside className="agent-panel">
-        <div className="panel-tabs">
-          <button className={`panel-tab ${activeTab === "ai" ? "active" : ""}`} onClick={() => switchTab("ai")}>AI Agent</button>
-          <button className={`panel-tab ${activeTab === "overlays" ? "active" : ""}`} onClick={() => switchTab("overlays")}>Text</button>
-          <button className={`panel-tab ${activeTab === "audio" ? "active" : ""}`} onClick={() => switchTab("audio")}>Audio</button>
+      {/* ─── RIGHT PANEL ─── */}
+      <aside className="flex flex-col bg-card border-l border-border overflow-hidden">
+        {/* Tabs */}
+        <div className="flex border-b border-border">
+          {tabItems.map(({ id, label, icon }) => (
+            <button
+              key={id}
+              className={cn(
+                "flex-1 flex items-center justify-center gap-1.5 px-3 py-3 text-xs font-semibold transition-all border-b-2 border-transparent",
+                activeTab === id
+                  ? "text-primary border-primary bg-primary/5"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent/5"
+              )}
+              onClick={() => switchTab(id)}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
         </div>
 
-        <div className="agent-body">
+        <div className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto">
+          {/* AI Tab */}
           {activeTab === "ai" && (
             <>
               {!sessionResumeNeeded && (
-                <div className="agent-desc">
+                <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
                   AI agents analyze your video and automatically select the best highlights.
                 </div>
               )}
 
               {sessionResumeNeeded && activeClip && !agentLoading && (
-                <div className="agent-result" style={{ borderColor: "var(--orange)" }}>
-                  <div className="agent-result-label" style={{ color: "var(--orange)" }}>Analysis Interrupted</div>
-                  <div className="agent-result-text">Your AI analysis was interrupted by a page refresh. Would you like to restart it?</div>
+                <div className="flex items-start gap-2.5 p-3 rounded-lg border border-warning/30 bg-warning/5">
+                  <AlertCircle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-warning">Analysis Interrupted</p>
+                    <p className="text-[11px] text-muted-foreground mt-1">Your AI analysis was interrupted by a page refresh. Would you like to restart it?</p>
+                  </div>
                 </div>
               )}
 
-              <button
-                className={`auto-edit-btn ${agentLoading || exporting ? "loading" : ""}`}
+              <Button
+                variant={agentLoading || exporting ? "secondary" : "gradient"}
+                size="lg"
+                className="w-full gap-2"
                 onClick={handleAutoEdit}
                 disabled={agentLoading || exporting || !activeClip}
               >
                 {agentLoading ? (
-                  <><span className="spinner" /> Analyzing...</>
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Analyzing...</>
                 ) : exporting ? (
-                  <><span className="spinner" /> Exporting {exportProgress}%...</>
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Exporting {exportProgress}%...</>
                 ) : sessionResumeNeeded ? (
-                  "Restart AI Analysis"
+                  <><RotateCcw className="w-4 h-4" /> Restart AI Analysis</>
                 ) : (
-                  "Auto Edit with AI"
+                  <><Sparkles className="w-4 h-4" /> Auto Edit with AI</>
                 )}
-              </button>
+              </Button>
 
               {/* Step-based pipeline progress */}
               {agentLoading && (
-                <div className="agent-steps">
+                <div className="flex flex-col gap-1 p-3 bg-secondary/50 border border-border rounded-lg">
                   {AI_STEPS.map((step, stepIdx) => {
                     const status = stepIdx < currentStepIdx ? "done" : stepIdx === currentStepIdx ? "active" : "pending";
                     const stepTs = stepTimestampsRef.current[step];
                     const nextStepTs = stepIdx < AI_STEPS.length - 1 ? stepTimestampsRef.current[AI_STEPS[stepIdx + 1]] : undefined;
                     return (
-                      <div key={step} className={`agent-step ${status}`}>
-                        <span className="step-indicator">
+                      <div
+                        key={step}
+                        className={cn(
+                          "flex items-center gap-2.5 py-1.5 px-1 text-xs transition-colors rounded",
+                          status === "active" && "text-primary font-semibold",
+                          status === "done" && "text-success",
+                          status === "pending" && "text-muted-foreground"
+                        )}
+                      >
+                        <span className="w-5 flex items-center justify-center flex-shrink-0">
                           {status === "done" ? (
-                            <span className="step-check">{"\u2713"}</span>
+                            <Check className="w-3.5 h-3.5 text-success" />
                           ) : status === "active" ? (
-                            <span className="spinner" />
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
                           ) : (
-                            <span className="step-pending-dot" />
+                            <span className="w-1.5 h-1.5 rounded-full bg-border" />
                           )}
                         </span>
-                        <span className="step-label">{step.replace(/_/g, " ")}</span>
+                        <span className="capitalize">{step.replace(/_/g, " ").toLowerCase()}</span>
                         {status === "done" && stepTs && nextStepTs && (
-                          <span className="step-time">{Math.round((nextStepTs - stepTs) / 1000)}s</span>
+                          <span className="ml-auto text-[9px] font-mono text-muted-foreground">{Math.round((nextStepTs - stepTs) / 1000)}s</span>
                         )}
                         {status === "active" && stepTs && (
-                          <span className="step-time">{Math.round((Date.now() - stepTs) / 1000)}s</span>
+                          <span className="ml-auto text-[9px] font-mono text-muted-foreground">{Math.round((Date.now() - stepTs) / 1000)}s</span>
                         )}
                       </div>
                     );
                   })}
-                  <div className="agent-progress-bar">
-                    <div className="progress-bar">
-                      <div className="progress-fill" style={{ width: `${currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0}%` }} />
-                    </div>
-                    <span className="progress-label">{currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0}%</span>
+                  <div className="flex items-center gap-2 pt-2 mt-1">
+                    <Progress value={currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0} className="flex-1" />
+                    <span className="text-[10px] text-muted-foreground min-w-[32px] text-right">
+                      {currentStepIdx >= 0 ? Math.round(((currentStepIdx + 1) / AI_STEPS.length) * 100) : 0}%
+                    </span>
                   </div>
-                  <div className="agent-time-row">
-                    <span className="agent-elapsed">{fmt(agentElapsed)}</span>
-                    <span className="agent-estimate">{estimateRemaining() || ""}</span>
+                  <div className="flex justify-between pt-1 mt-1 border-t border-border text-[10px]">
+                    <span className="font-mono text-foreground">{fmt(agentElapsed)}</span>
+                    <span className="text-muted-foreground">{estimateRemaining() || ""}</span>
                   </div>
                   <div ref={progressEndRef} />
                 </div>
               )}
 
               {agentSummary && (
-                <div className={`agent-result ${agentSummary.startsWith("Error") ? "error" : ""}`}>
-                  <div className="agent-result-label">{agentSummary.startsWith("Error") ? "Error" : "AI Decision"}</div>
-                  <div className="agent-result-text">{agentSummary}</div>
+                <div className={cn(
+                  "p-3 rounded-lg border flex flex-col gap-1",
+                  agentSummary.startsWith("Error")
+                    ? "border-destructive/30 bg-destructive/5"
+                    : "border-primary/30 bg-primary/5"
+                )}>
+                  <span className={cn(
+                    "text-[10px] font-bold uppercase tracking-wider",
+                    agentSummary.startsWith("Error") ? "text-destructive" : "text-primary"
+                  )}>
+                    {agentSummary.startsWith("Error") ? "Error" : "AI Decision"}
+                  </span>
+                  <p className="text-xs text-foreground leading-relaxed">{agentSummary}</p>
                 </div>
               )}
             </>
           )}
 
+          {/* Text Overlays Tab */}
           {activeTab === "overlays" && (
             <>
-              <div className="agent-desc">
+              <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
                 Add text overlays to your video. They will be burned into the export.
               </div>
 
-              <button className="auto-edit-btn" onClick={addOverlay} disabled={!activeClip}>
-                + Add Text Overlay
-              </button>
+              <Button variant="gradient" size="default" className="w-full gap-2" onClick={addOverlay} disabled={!activeClip}>
+                <Plus className="w-4 h-4" />
+                Add Text Overlay
+              </Button>
 
-              <div className="overlay-list">
+              <div className="flex flex-col gap-2">
                 {(state.overlays || []).map(o => (
-                  <div key={o.id} className="overlay-card">
-                    <div className="overlay-row">
+                  <div key={o.id} className="flex flex-col gap-2 p-3 rounded-lg border border-border bg-secondary/50">
+                    <div className="flex items-center gap-2">
                       <input
-                        className="overlay-text-input"
+                        className="flex-1 bg-background border border-border rounded-md px-2.5 py-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-all"
                         value={o.text}
                         onChange={e => updateOverlay(o.id, { text: e.target.value })}
                         placeholder="Enter text..."
                       />
-                      <button className="seg-remove" onClick={() => removeOverlay(o.id)}>&times;</button>
+                      <button
+                        className="text-muted-foreground hover:text-destructive transition-colors p-1"
+                        onClick={() => removeOverlay(o.id)}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                    <div className="overlay-row">
-                      <label className="overlay-label">
-                        Size
-                        <input type="range" min={12} max={72} value={o.fontSize}
-                          onChange={e => updateOverlay(o.id, { fontSize: parseInt(e.target.value) })} />
-                        <span className="overlay-val">{o.fontSize}</span>
-                      </label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground w-7">Size</span>
+                      <Slider
+                        className="flex-1"
+                        min={12}
+                        max={72}
+                        value={o.fontSize}
+                        onValueChange={(v) => updateOverlay(o.id, { fontSize: v })}
+                      />
+                      <span className="text-[10px] font-mono text-muted-foreground w-5 text-right">{o.fontSize}</span>
                     </div>
-                    <div className="overlay-row">
-                      <label className="overlay-label">
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         Color
-                        <input type="color" value={o.color} onChange={e => updateOverlay(o.id, { color: e.target.value })} />
+                        <input
+                          type="color"
+                          value={o.color}
+                          onChange={e => updateOverlay(o.id, { color: e.target.value })}
+                          className="w-6 h-6 border-0 rounded cursor-pointer bg-transparent p-0"
+                        />
                       </label>
-                      <label className="overlay-label">
+                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         X
-                        <input type="range" min={0} max={100} value={o.x}
-                          onChange={e => updateOverlay(o.id, { x: parseInt(e.target.value) })} />
+                        <Slider min={0} max={100} value={o.x} onValueChange={(v) => updateOverlay(o.id, { x: v })} className="flex-1" />
                       </label>
-                      <label className="overlay-label">
+                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         Y
-                        <input type="range" min={0} max={100} value={o.y}
-                          onChange={e => updateOverlay(o.id, { y: parseInt(e.target.value) })} />
+                        <Slider min={0} max={100} value={o.y} onValueChange={(v) => updateOverlay(o.id, { y: v })} className="flex-1" />
                       </label>
                     </div>
-                    <div className="overlay-row">
-                      <label className="overlay-label">
+                    <div className="flex items-center gap-3">
+                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         From
-                        <input type="number" min={0} max={duration} step={0.1} value={o.from}
-                          onChange={e => updateOverlay(o.id, { from: parseFloat(e.target.value) || 0 })} />
+                        <input
+                          type="number"
+                          min={0}
+                          max={duration}
+                          step={0.1}
+                          value={o.from}
+                          onChange={e => updateOverlay(o.id, { from: parseFloat(e.target.value) || 0 })}
+                          className="w-14 bg-background border border-border rounded px-1.5 py-1 text-[10px] font-mono text-foreground outline-none focus:border-primary"
+                        />
                       </label>
-                      <label className="overlay-label">
+                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         To
-                        <input type="number" min={0} max={duration} step={0.1} value={o.to}
-                          onChange={e => updateOverlay(o.id, { to: parseFloat(e.target.value) || duration })} />
+                        <input
+                          type="number"
+                          min={0}
+                          max={duration}
+                          step={0.1}
+                          value={o.to}
+                          onChange={e => updateOverlay(o.id, { to: parseFloat(e.target.value) || duration })}
+                          className="w-14 bg-background border border-border rounded px-1.5 py-1 text-[10px] font-mono text-foreground outline-none focus:border-primary"
+                        />
                       </label>
                     </div>
                   </div>
@@ -824,29 +973,41 @@ export default function App() {
             </>
           )}
 
+          {/* Audio Tab */}
           {activeTab === "audio" && (
             <>
-              <div className="agent-desc">
+              <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
                 Adjust the audio volume for your video export.
               </div>
 
-              <div className="volume-control">
-                <div className="volume-header">
-                  <span className="volume-label">Volume</span>
-                  <span className="volume-value">{state.volume ?? 100}%</span>
+              <div className="flex flex-col gap-3 p-3 rounded-lg border border-border bg-secondary/50">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-semibold text-foreground">Volume</span>
+                  <span className="font-mono text-sm font-bold text-primary">{state.volume ?? 100}%</span>
                 </div>
-                <input
-                  type="range"
+                <Slider
                   min={0}
                   max={200}
                   value={state.volume ?? 100}
-                  onChange={e => save({ ...state, volume: parseInt(e.target.value) })}
+                  onValueChange={(v) => save({ ...state, volume: v })}
                 />
-                <div className="volume-presets">
-                  <button onClick={() => save({ ...state, volume: 0 })}>Mute</button>
-                  <button onClick={() => save({ ...state, volume: 50 })}>50%</button>
-                  <button onClick={() => save({ ...state, volume: 100 })}>100%</button>
-                  <button onClick={() => save({ ...state, volume: 150 })}>150%</button>
+                <div className="flex gap-1.5">
+                  {[
+                    { label: "Mute", value: 0 },
+                    { label: "50%", value: 50 },
+                    { label: "100%", value: 100 },
+                    { label: "150%", value: 150 },
+                  ].map(({ label, value }) => (
+                    <Button
+                      key={value}
+                      variant="outline"
+                      size="sm"
+                      className={cn("flex-1 text-[10px]", state.volume === value && "border-primary text-primary")}
+                      onClick={() => save({ ...state, volume: value })}
+                    >
+                      {label}
+                    </Button>
+                  ))}
                 </div>
               </div>
             </>
@@ -854,7 +1015,12 @@ export default function App() {
         </div>
       </aside>
 
-      {toast && <div className="toast">{toast}</div>}
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 bg-primary text-primary-foreground px-5 py-2.5 rounded-full text-xs font-medium shadow-lg shadow-primary/20 z-50 animate-slide-up pointer-events-none">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
