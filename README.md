@@ -65,6 +65,21 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
   --data-binary @input.mp4 -H "Content-Type: video/mp4" -o trimmed.mp4
 ```
 
+## Available Scripts
+
+| Script | Description |
+|---|---|
+| `npm run dev` | Start all services (API + bot + web) concurrently |
+| `npm run dev:api` | Start API server only |
+| `npm run dev:bot` | Start multi-channel bot only |
+| `npm run dev:web` | Start web UI dev server only |
+| `npm run build` | Build web UI for production |
+| `npm run lint` | Run ESLint on web app |
+| `npm run typecheck` | Run TypeScript type checking |
+| `npm test` | Run API tests |
+| `npm run check-deps` | Check for deprecated/vulnerable dependencies |
+| `npm run check-deps:full` | Full dependency check including npm audit |
+
 ## Tech Stack
 
 | Layer | Tech |
@@ -72,6 +87,7 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
 | Backend | Express.js, ffmpeg/ffprobe |
 | AI | Multi-agent pipeline (6 agents), Ollama / Claude API, RAG knowledge base |
+| Bot | grammy (Telegram), discord.js, @slack/bolt, and 9 more channel adapters |
 | Persistence | IndexedDB (client), filesystem (server) |
 
 ## Project Structure
@@ -80,6 +96,7 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 apps/web/        Frontend (React + Tailwind + shadcn/ui)
 apps/api/        Backend (Express + ffmpeg + AI pipeline)
 packages/core/   Shared TypeScript types
+scripts/         Tooling (dependency health checks)
 ```
 
 <details>
@@ -127,11 +144,16 @@ Claude Desktop config:
 Tools: `probe_video`, `extract_frames`, `analyze_scene`, `search_knowledge`, `calculate_pacing`.
 </details>
 
-## Testing
+## Dependency Health
 
-```bash
-npm test
-```
+This project enforces zero deprecated direct dependencies. An automated check (`scripts/check-deps.js`) runs:
+
+- **Locally** via `npm run check-deps` after any dependency change
+- **In CI** on every PR and push to master (blocks merge on new issues)
+
+The check scans for blocklisted packages, version floor violations, and npm audit vulnerabilities. Known transitive issues from optional dependencies (e.g., `whatsapp-web.js`, `matrix-bot-sdk`) are logged as warnings but don't block builds.
+
+To add a package to the blocklist or update version floors, edit `scripts/check-deps.js`.
 
 ## License
 

@@ -26,5 +26,10 @@
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
+  },
+  "overrides": {
+    "multer": {
+      "mkdirp": "^3.0.1"
+    }
   }
 }

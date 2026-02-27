@@ -50,22 +50,35 @@ const VERSION_FLOOR = {
 // ─── Known transitive exceptions ─────────────────────────────────────────────
 // These deprecated packages come from dependencies we don't control.
 // They are logged as WARNINGS but do NOT fail the build.
-// Each entry: package name → which direct dep brings it in.
-// Review this list periodically and remove entries when upstream fixes land.
+// Two mechanisms:
+//   1. TRANSITIVE_EXCEPTIONS: specific package names → always treated as warning.
+//   2. OPTIONAL_DEP_ROOTS: if a deprecated/outdated package's dependency path
+//      goes through one of these optional dependencies, it's a warning.
 const TRANSITIVE_EXCEPTIONS = {
-  'request':              'Transitive via node-telegram-bot-api → @cypress/request-promise.',
-  'request-promise-core': 'Transitive via node-telegram-bot-api → @cypress/request-promise.',
+  'request':              'Transitive via matrix-bot-sdk → request-promise → request.',
+  'request-promise':      'Transitive via matrix-bot-sdk (optional dep).',
+  'request-promise-core': 'Transitive via matrix-bot-sdk → request-promise.',
   'har-validator':        'Transitive via request.',
   'tough-cookie':         'Transitive via request.',
-  'uuid':                 'Transitive via request (uses uuid@3). Not a direct dep.',
+  'uuid':                 'Transitive via various optional deps. Not a direct dep.',
+  'fstream':              'Transitive via whatsapp-web.js (optional) → unzipper.',
+  'inflight':             'Transitive via whatsapp-web.js (optional) → archiver → glob@7.',
 };
+
+// Optional deps whose entire transitive tree is treated as non-blocking.
+// Deprecated transitive deps under these roots are logged as warnings only.
+const OPTIONAL_DEP_ROOTS = new Set([
+  'whatsapp-web.js',  // Brings archiver, unzipper, fstream, glob@7, rimraf@2
+  'matrix-bot-sdk',   // Brings request-promise → request chain
+  'botbuilder',       // Brings request-promise → request chain
+]);
 
 // ─── Known vulnerability exceptions (transitive, cannot fix upstream) ────────
 // These are security issues in the request dependency chain brought in by
-// node-telegram-bot-api. They will be logged as warnings, not failures.
-// Review this list when upgrading node-telegram-bot-api or its replacement.
+// matrix-bot-sdk (optional). They will be logged as warnings, not failures.
+// Review this list when upgrading matrix-bot-sdk or its replacement.
 const AUDIT_EXCEPTIONS = new Set([
-  'request',    // SSRF — transitive via node-telegram-bot-api
+  'request',    // SSRF — transitive via matrix-bot-sdk
   'form-data',  // Weak random boundary — transitive via request
   'qs',         // DoS via memory — transitive via request
 ]);
@@ -240,14 +253,23 @@ function main() {
 
   for (const issue of issues) {
     const pkgName = issue.pkg.split('@')[0];
-    const isKnownTransitive = TRANSITIVE_EXCEPTIONS[pkgName] && issue.severity === 'DEPRECATED';
+    const isKnownTransitive = TRANSITIVE_EXCEPTIONS[pkgName] &&
+      (issue.severity === 'DEPRECATED' || issue.severity === 'OUTDATED');
     const isKnownAuditException = AUDIT_EXCEPTIONS.has(pkgName) && issue.severity.startsWith('VULN-');
-    if (isKnownTransitive || isKnownAuditException) {
-      issue.severity = isKnownTransitive ? 'WARN-TRANSITIVE' : 'WARN-VULN-KNOWN';
+    // Check if the issue comes from an optional dep root's transitive tree
+    const isFromOptionalRoot = issue.location &&
+      [...OPTIONAL_DEP_ROOTS].some(root => issue.location.includes(root));
+
+    if (isKnownTransitive || isKnownAuditException || isFromOptionalRoot) {
       if (isKnownTransitive) {
+        issue.severity = 'WARN-TRANSITIVE';
         issue.reason += ` (${TRANSITIVE_EXCEPTIONS[pkgName]})`;
+      } else if (isKnownAuditException) {
+        issue.severity = 'WARN-VULN-KNOWN';
+        issue.reason += ' (Known transitive vulnerability from optional dep chain)';
       } else {
-        issue.reason += ' (Known transitive vulnerability from node-telegram-bot-api chain)';
+        issue.severity = 'WARN-OPTIONAL-DEP';
+        issue.reason += ` (From optional dependency tree)`;
       }
       warnings.push(issue);
     } else {
