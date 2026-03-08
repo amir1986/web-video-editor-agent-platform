@@ -23,10 +23,10 @@ const CHANNEL_REGISTRY = [
 
 // Maps channel id → npm packages needed
 const PACKAGE_HINTS = {
-  telegram:      ["node-telegram-bot-api"],
+  telegram:      ["grammy"],
   discord:       ["discord.js"],
   slack:         ["@slack/bolt"],
-  whatsapp:      ["whatsapp-web.js"],
+  whatsapp:      ["@whiskeysockets/baileys"],
   teams:         ["botbuilder"],
   matrix:        ["matrix-bot-sdk"],
   signal:        [],       // Uses built-in net module + signal-cli daemon

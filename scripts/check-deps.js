@@ -54,19 +54,6 @@ const VERSION_FLOOR = {
 // Each entry: package name → which direct dep brings it in.
 // Review this list periodically and remove entries when upstream fixes land.
 const TRANSITIVE_EXCEPTIONS = {
-  // ── request chain (node-telegram-bot-api → @cypress/request-promise) ───────
-  'request':              'Transitive via node-telegram-bot-api → @cypress/request-promise.',
-  'request-promise':      'Transitive via matrix-bot-sdk (optional channel). Upgrade blocked upstream.',
-  'request-promise-core': 'Transitive via node-telegram-bot-api → @cypress/request-promise.',
-  'har-validator':        'Transitive via request.',
-  'tough-cookie':         'Transitive via request.',
-  'uuid':                 'Transitive via request (uses uuid@3). Not a direct dep.',
-  // ── whatsapp-web.js optional channel ────────────────────────────────────────
-  'fluent-ffmpeg':        'Transitive via whatsapp-web.js (optional channel). Upgrade blocked upstream.',
-  'fstream':              'Transitive via whatsapp-web.js → unzipper. Upgrade blocked upstream.',
-  'rimraf':               'Transitive via whatsapp-web.js → unzipper → fstream. Upgrade blocked upstream.',
-  'glob':                 'Transitive via whatsapp-web.js → archiver → archiver-utils. Upgrade blocked upstream.',
-  'inflight':             'Transitive via whatsapp-web.js → archiver → archiver-utils → glob. Upgrade blocked upstream.',
   // ── botbuilder optional channel ─────────────────────────────────────────────
   'uuid':                 'Transitive via botbuilder → @azure/msal-node (uses uuid@8). Upgrade blocked upstream.',
   // ── multer (direct dep) ─────────────────────────────────────────────────────
