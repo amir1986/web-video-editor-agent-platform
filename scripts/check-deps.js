@@ -35,6 +35,7 @@ const BLOCKLIST = {
   'osenv':            'Deprecated. Use os.homedir() / os.tmpdir().',
   'node-uuid':        'Renamed to uuid. Use uuid >= 9.x.',
   'nomnom':           'Deprecated. Use commander or yargs.',
+  'tough-cookie':     'Versions < 5 have prototype pollution CVE.',
   'resolve-url':      'Deprecated (abandoned). Use the built-in URL / path APIs.',
 };
 
@@ -53,6 +54,13 @@ const VERSION_FLOOR = {
 // Each entry: package name → which direct dep brings it in.
 // Review this list periodically and remove entries when upstream fixes land.
 const TRANSITIVE_EXCEPTIONS = {
+  // ── request chain (node-telegram-bot-api → @cypress/request-promise) ───────
+  'request':              'Transitive via node-telegram-bot-api → @cypress/request-promise.',
+  'request-promise':      'Transitive via matrix-bot-sdk (optional channel). Upgrade blocked upstream.',
+  'request-promise-core': 'Transitive via node-telegram-bot-api → @cypress/request-promise.',
+  'har-validator':        'Transitive via request.',
+  'tough-cookie':         'Transitive via request.',
+  'uuid':                 'Transitive via request (uses uuid@3). Not a direct dep.',
   // ── whatsapp-web.js optional channel ────────────────────────────────────────
   'fluent-ffmpeg':        'Transitive via whatsapp-web.js (optional channel). Upgrade blocked upstream.',
   'fstream':              'Transitive via whatsapp-web.js → unzipper. Upgrade blocked upstream.',
