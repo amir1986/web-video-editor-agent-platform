@@ -80,6 +80,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("ai");
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [modelsList, setModelsList] = useState<{ id: string; label: string }[]>([]);
+  const [puterUser, setPuterUser] = useState<{ isGuest: boolean; username?: string } | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     (localStorage.getItem("theme") as "dark" | "light") || "dark"
   );
@@ -161,15 +162,28 @@ export default function App() {
     }).catch(console.error);
   }, []);
 
-  // Load available AI models from Puter.js and pick a smart default
+  // Load available AI models from Puter.js and resolve current auth state.
+  // Puter auto-creates a free temporary guest account on first use — no sign-in
+  // required. Users can optionally sign in later for a persistent account.
   useEffect(() => {
     (async () => {
       try {
+        // Resolve current Puter auth state (may be guest or signed-in user)
+        const signedIn: boolean = await puter.auth.isLoggedIn().catch(() => false);
+        if (signedIn) {
+          const user = await puter.auth.getUser().catch(() => null);
+          setPuterUser({ isGuest: false, username: user?.username });
+        } else {
+          // Not signed in — Puter will silently create a guest session on the
+          // first puter.ai.chat() call. Mark as guest so the UI can offer sign-in.
+          setPuterUser({ isGuest: true });
+        }
+
         const models: any[] = await puter.ai.listModels();
         const items = models.map((m: any) => {
           // Prefer an alias ending with "-latest", else fall back to model id
           const latestAlias = (m.aliases || []).find((a: string) => a.endsWith("-latest"));
-          return { id: latestAlias || m.id, label: m.name || m.id, raw: m };
+          return { id: latestAlias || m.id, label: m.name || m.id };
         });
         setModelsList(items);
 
@@ -185,8 +199,9 @@ export default function App() {
           setSelectedModel(latestAlias || pick.id);
         }
       } catch (e) {
-        console.error("[Puter] listModels failed:", e);
-        // Sane fallback so the UI is usable even if listModels errors
+        console.error("[Puter] init failed:", e);
+        // Sane fallback so the UI is usable even if Puter init errors
+        setPuterUser({ isGuest: true });
         setModelsList([{ id: "claude-3-5-sonnet", label: "Claude 3.5 Sonnet (fallback)" }]);
         setSelectedModel("claude-3-5-sonnet");
       }
@@ -328,18 +343,11 @@ export default function App() {
       return next;
     });
 
-    // ── Ensure Puter.js is authenticated before running agents ───────────────
-    // puter.ai.chat() triggers an OAuth popup automatically on the first call
-    // if the user is not signed in. We pre-check so we can surface a clear
-    // error rather than silently falling back to deterministic segments.
-    try {
-      const signedIn = await puter.auth.isLoggedIn();
-      if (!signedIn) {
-        await puter.auth.signIn(); // shows OAuth popup
-      }
-    } catch (authErr) {
-      throw new Error("Puter sign-in required to run AI agents. Please allow the popup and try again.");
-    }
+    // ── Guest-first: Puter auto-creates a free temporary guest account ────────
+    // puter.ai.chat() works without any explicit sign-in. On the very first call
+    // Puter silently provisions a guest session — no popup, no API key needed.
+    // If the user has signed in (via the button in the AI panel) they get their
+    // persistent quota instead. Either way we just call puter.ai.chat() directly.
 
     // ── Helper: stream one Puter AI turn and return the full text ────────────
     const puterChat = async (messages: { role: string; content: any }[]): Promise<string> => {
@@ -501,7 +509,8 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       let newInOut = state.inOut;
       if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
       save({ ...state, inOut: newInOut, editPlan });
-      saveAgentSummary(`${segs.length} highlights selected via Puter.js (${selectedModel})`);
+      const accountLabel = puterUser?.isGuest ? "guest" : (puterUser?.username || "puter");
+      saveAgentSummary(`${segs.length} highlights selected via Puter.js [${accountLabel} · ${selectedModel}]`);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -895,6 +904,43 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
               {!sessionResumeNeeded && (
                 <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
                   AI agents analyze your video and automatically select the best highlights.
+                </div>
+              )}
+
+              {/* Puter auth status — guest runs free, sign-in for persistent quota */}
+              {puterUser && (
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md border border-border bg-secondary/40 text-[10px]">
+                  <span className="text-muted-foreground">
+                    {puterUser.isGuest
+                      ? "Running as guest (free)"
+                      : `Puter: ${puterUser.username}`}
+                  </span>
+                  {puterUser.isGuest ? (
+                    <button
+                      className="text-primary font-semibold hover:underline"
+                      onClick={async () => {
+                        try {
+                          await puter.auth.signIn();
+                          const user = await puter.auth.getUser().catch(() => null);
+                          setPuterUser({ isGuest: false, username: user?.username });
+                        } catch {}
+                      }}
+                    >
+                      Sign in
+                    </button>
+                  ) : (
+                    <button
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={async () => {
+                        try {
+                          await puter.auth.signOut();
+                          setPuterUser({ isGuest: true });
+                        } catch {}
+                      }}
+                    >
+                      Sign out
+                    </button>
+                  )}
                 </div>
               )}
 
