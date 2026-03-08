@@ -923,7 +923,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                           await puter.auth.signIn();
                           const user = await puter.auth.getUser().catch(() => null);
                           setPuterUser({ isGuest: false, username: user?.username });
-                        } catch {}
+                        } catch (_e) { /* sign-in cancelled or failed — stay as guest */ }
                       }}
                     >
                       Sign in
@@ -935,7 +935,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                         try {
                           await puter.auth.signOut();
                           setPuterUser({ isGuest: true });
-                        } catch {}
+                        } catch (_e) { /* sign-out failed — ignore */ }
                       }}
                     >
                       Sign out
