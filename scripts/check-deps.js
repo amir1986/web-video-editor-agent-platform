@@ -31,12 +31,10 @@ const BLOCKLIST = {
   'querystring':      'Deprecated Node.js built-in. Use URLSearchParams.',
   'inflight':         'Deprecated, memory leak. Use lru-cache for coalescing.',
   'fstream':          'Deprecated since 2016. Use fs/promises + tar@7.',
-  'uuid':             'Only v1–v3 are deprecated. Ensure >= 9.x.',
   'har-validator':    'Deprecated. Use har-schema directly.',
   'osenv':            'Deprecated. Use os.homedir() / os.tmpdir().',
   'node-uuid':        'Renamed to uuid. Use uuid >= 9.x.',
   'nomnom':           'Deprecated. Use commander or yargs.',
-  'tough-cookie':     'Versions < 5 have prototype pollution CVE.',
   'resolve-url':      'Deprecated (abandoned). Use the built-in URL / path APIs.',
 };
 
@@ -46,6 +44,7 @@ const VERSION_FLOOR = {
   'glob':             { min: '9.0.0', note: 'Versions < 9 have security issues.' },
   'mkdirp':           { min: '2.0.0', note: 'Versions < 2 are deprecated.' },
   'fluent-ffmpeg':    { min: '3.0.0', note: 'Version 2.x is unmaintained since 2021.' },
+  'uuid':             { min: '9.0.0', note: 'Versions < 9 use deprecated v1-v3 UUIDs.' },
 };
 
 // ─── Known transitive exceptions ─────────────────────────────────────────────
@@ -54,19 +53,14 @@ const VERSION_FLOOR = {
 // Each entry: package name → which direct dep brings it in.
 // Review this list periodically and remove entries when upstream fixes land.
 const TRANSITIVE_EXCEPTIONS = {
-  // ── request chain (node-telegram-bot-api → @cypress/request-promise) ───────
-  'request':              'Transitive via node-telegram-bot-api → @cypress/request-promise.',
-  'request-promise':      'Transitive via matrix-bot-sdk (optional channel). Upgrade blocked upstream.',
-  'request-promise-core': 'Transitive via node-telegram-bot-api → @cypress/request-promise.',
-  'har-validator':        'Transitive via request.',
-  'tough-cookie':         'Transitive via request.',
-  'uuid':                 'Transitive via request (uses uuid@3). Not a direct dep.',
   // ── whatsapp-web.js optional channel ────────────────────────────────────────
   'fluent-ffmpeg':        'Transitive via whatsapp-web.js (optional channel). Upgrade blocked upstream.',
   'fstream':              'Transitive via whatsapp-web.js → unzipper. Upgrade blocked upstream.',
   'rimraf':               'Transitive via whatsapp-web.js → unzipper → fstream. Upgrade blocked upstream.',
   'glob':                 'Transitive via whatsapp-web.js → archiver → archiver-utils. Upgrade blocked upstream.',
   'inflight':             'Transitive via whatsapp-web.js → archiver → archiver-utils → glob. Upgrade blocked upstream.',
+  // ── botbuilder optional channel ─────────────────────────────────────────────
+  'uuid':                 'Transitive via botbuilder → @azure/msal-node (uses uuid@8). Upgrade blocked upstream.',
   // ── multer (direct dep) ─────────────────────────────────────────────────────
   'mkdirp':               'Transitive via multer@2 (uses mkdirp@0.5). Upgrade blocked upstream.',
   // ── misc ────────────────────────────────────────────────────────────────────
@@ -74,14 +68,8 @@ const TRANSITIVE_EXCEPTIONS = {
 };
 
 // ─── Known vulnerability exceptions (transitive, cannot fix upstream) ────────
-// These are security issues in the request dependency chain brought in by
-// node-telegram-bot-api. They will be logged as warnings, not failures.
-// Review this list when upgrading node-telegram-bot-api or its replacement.
-const AUDIT_EXCEPTIONS = new Set([
-  'request',    // SSRF — transitive via node-telegram-bot-api
-  'form-data',  // Weak random boundary — transitive via request
-  'qs',         // DoS via memory — transitive via request
-]);
+// Add packages here only when a vulnerability is in a dep we cannot control.
+const AUDIT_EXCEPTIONS = new Set([]);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
