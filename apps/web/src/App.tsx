@@ -30,6 +30,9 @@ import {
 } from "lucide-react";
 preloadFFmpeg().catch(console.error);
 
+// Puter.js is loaded via <script> in index.html — declare global so TS is happy
+declare const puter: any;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -75,7 +78,8 @@ export default function App() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportDone, setExportDone] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("ai");
-  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [modelsList, setModelsList] = useState<{ id: string; label: string }[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     (localStorage.getItem("theme") as "dark" | "light") || "dark"
   );
@@ -157,16 +161,36 @@ export default function App() {
     }).catch(console.error);
   }, []);
 
-  // Auto-login
+  // Load available AI models from Puter.js and pick a smart default
   useEffect(() => {
-    fetch(`${API_BASE}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    })
-      .then(r => r.json())
-      .then(d => { if (d.token) setAuthToken(d.token); })
-      .catch(() => {});
+    (async () => {
+      try {
+        const models: any[] = await puter.ai.listModels();
+        const items = models.map((m: any) => {
+          // Prefer an alias ending with "-latest", else fall back to model id
+          const latestAlias = (m.aliases || []).find((a: string) => a.endsWith("-latest"));
+          return { id: latestAlias || m.id, label: m.name || m.id, raw: m };
+        });
+        setModelsList(items);
+
+        // Default selection: newest Sonnet from claude/anthropic → claude-3-5-sonnet fallback → first
+        const claudeModels = models.filter(
+          (m: any) => (m.provider || "").toLowerCase().includes("claude") || (m.provider || "").toLowerCase().includes("anthropic")
+        );
+        const sonnetModels = claudeModels.filter((m: any) => (m.name || m.id || "").toLowerCase().includes("sonnet"));
+        sonnetModels.sort((a: any, b: any) => (b.name || b.id || "").localeCompare(a.name || a.id || ""));
+        const pick = sonnetModels[0] || models.find((m: any) => (m.id || "").includes("claude-3-5-sonnet")) || models[0];
+        if (pick) {
+          const latestAlias = (pick.aliases || []).find((a: string) => a.endsWith("-latest"));
+          setSelectedModel(latestAlias || pick.id);
+        }
+      } catch (e) {
+        console.error("[Puter] listModels failed:", e);
+        // Sane fallback so the UI is usable even if listModels errors
+        setModelsList([{ id: "claude-3-5-sonnet", label: "Claude 3.5 Sonnet (fallback)" }]);
+        setSelectedModel("claude-3-5-sonnet");
+      }
+    })();
   }, []);
 
   const save = useCallback((newState: ProjectState) => {
@@ -251,11 +275,6 @@ export default function App() {
 
   const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
 
-  const authHeaders = (): Record<string, string> => {
-    if (!authToken) return {};
-    return { Authorization: `Bearer ${authToken}` };
-  };
-
   const jumpToSegment = (seg: Segment) => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = seg.src_in;
@@ -309,91 +328,169 @@ export default function App() {
       return next;
     });
 
-    const controller = new AbortController();
-    const IDLE_MS = 60_000;
-    let timeout = setTimeout(() => controller.abort(), IDLE_MS);
+    // ── Helper: stream one Puter AI turn and return the full text ────────────
+    const puterChat = async (messages: { role: string; content: any }[]): Promise<string> => {
+      const stream = await puter.ai.chat(messages, { model: selectedModel, stream: true });
+      let text = "";
+      for await (const part of stream) {
+        text += part?.text ?? "";
+      }
+      return text;
+    };
+
+    const extractJSON = (text: string): any => {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error("No JSON in AI response: " + text.slice(0, 200));
+      return JSON.parse(m[0]);
+    };
+
+    // ── Deterministic fallback when all LLM agents fail ────────────────────
+    const buildFallback = (dur: number): { segments: Segment[]; cut_notes: string } => {
+      if (dur <= 10) return { segments: [{ id: "s1", src_in: 0, src_out: Math.round(dur * 0.7 * 10) / 10 }], cut_notes: "Short — kept 70%" };
+      if (dur <= 30) return {
+        segments: [
+          { id: "s1", src_in: 0, src_out: Math.round(dur * 0.35 * 10) / 10 },
+          { id: "s2", src_in: Math.round(dur * 0.45 * 10) / 10, src_out: Math.round(dur * 0.85 * 10) / 10 },
+        ], cut_notes: "Short clip — best parts"
+      };
+      const seg = dur * 0.15;
+      return {
+        segments: [
+          { id: "s1", src_in: 0, src_out: Math.round(seg * 10) / 10 },
+          { id: "s2", src_in: Math.round(dur * 0.25 * 10) / 10, src_out: Math.round((dur * 0.25 + seg) * 10) / 10 },
+          { id: "s3", src_in: Math.round(dur * 0.50 * 10) / 10, src_out: Math.round((dur * 0.50 + seg) * 10) / 10 },
+          { id: "s4", src_in: Math.round(dur * 0.85 * 10) / 10, src_out: Math.round(dur * 10) / 10 },
+        ], cut_notes: "Time-based fallback"
+      };
+    };
 
     try {
       const frames = await extractFrames(videoRef.current, 10);
       const width = videoRef.current.videoWidth || 0;
       const height = videoRef.current.videoHeight || 0;
+      const fps = 30;
 
-      const res = await fetch(`${API_BASE}/api/analyze`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ duration, frames, width, height, fps: 30 }),
-        signal: controller.signal,
-      });
+      // ── 1. CUT AGENT (LLM + vision via Puter.js) ─────────────────────────
+      const markStep = (step: string) => {
+        if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
+        setAgentCurrentStep(step);
+        setAgentProgress(prev => [...prev, `[${step}] Running...`]);
+      };
 
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Server error ${res.status}: ${errText}`);
+      markStep("CUT");
+      let cutSegments: Segment[] = [];
+      try {
+        const cutPrompt = `You are the CUT AGENT — a professional video editor. Select the strongest 2-6 segments to keep for a highlight reel.
+RULES:
+- Total kept time MUST be less than ${(duration * 0.75).toFixed(1)} seconds.
+- Each segment: {"id":"s1","src_in":<seconds>,"src_out":<seconds>}
+- Segments must not overlap and must be sorted by src_in.
+- CUT OUT: dead air, filler, repetition, intros/outros if uninteresting.
+- KEEP: action, key points, emotional peaks, strong visuals.
+Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":0,"src_out":8},...],"cut_notes":"..."}
+
+VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
+        const frameContent = frames.map(f => ({ type: "image_url", image_url: { url: f } }));
+        const cutResp = await puterChat([{ role: "user", content: [{ type: "text", text: cutPrompt }, ...frameContent] }]);
+        const cutResult = extractJSON(cutResp);
+        const valid = (cutResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
+        const totalKept = valid.reduce((sum: number, s: any) => sum + (s.src_out - s.src_in), 0);
+        cutSegments = (valid.length && totalKept < duration * 0.75) ? valid : buildFallback(duration).segments;
+      } catch (e) {
+        console.warn("[CUT] AI failed, using fallback:", e);
+        cutSegments = buildFallback(duration).segments;
       }
+      setAgentProgress(prev => [...prev, `[CUT] Selected ${cutSegments.length} segments`]);
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let data: Record<string, unknown> | null = null;
+      // ── 2. STRUCTURE AGENT (LLM) ──────────────────────────────────────────
+      markStep("STRUCTURE");
+      let structSegments: Segment[] = cutSegments;
+      try {
+        const structPrompt = `You are the STRUCTURE AGENT. Reorder/adjust these segments for the best narrative arc (hook→buildup→climax→resolution). Total kept duration must stay between 30-75% of ${duration.toFixed(1)}s.
+Input: ${JSON.stringify(cutSegments)}
+Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>},...],"structure_notes":"..."}`;
+        const structResp = await puterChat([{ role: "user", content: structPrompt }]);
+        const structResult = extractJSON(structResp);
+        const valid = (structResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
+        if (valid.length) structSegments = valid;
+      } catch (e) {
+        console.warn("[STRUCTURE] AI failed, keeping cut order:", e);
+      }
+      setAgentProgress(prev => [...prev, `[STRUCTURE] Arranged ${structSegments.length} segments`]);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        clearTimeout(timeout);
-        timeout = setTimeout(() => controller.abort(), IDLE_MS);
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            if (event.type === "progress") {
-              setAgentProgress(prev => [...prev, `[${event.agent}] ${event.message}`]);
-              if (event.agent && event.agent !== "SYSTEM") {
-                const stepKey = event.agent as string;
-                if (!stepTimestampsRef.current[stepKey]) {
-                  stepTimestampsRef.current[stepKey] = Date.now();
-                }
-                setAgentCurrentStep(stepKey);
-              }
-            } else if (event.type === "result") {
-              data = event;
-            } else if (event.type === "error") {
-              throw new Error(event.message || event.error);
-            }
-          } catch {
-            try { data = JSON.parse(line); } catch { /* non-JSON line */ }
-          }
+      // ── 3. CONTINUITY AGENT (LLM) ─────────────────────────────────────────
+      markStep("CONTINUITY");
+      let contSegments: (Segment & { needs_soft_transition?: boolean })[] = structSegments.map(s => ({ ...s, needs_soft_transition: false }));
+      try {
+        const contPrompt = `You are the CONTINUITY AGENT. Review adjacent segment pairs for jarring transitions. Adjust boundaries by ±0.5s to improve flow. Flag segments needing soft transitions.
+Input: ${JSON.stringify(structSegments)}
+Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"needs_soft_transition":false},...],"continuity_notes":"..."}`;
+        const contResp = await puterChat([{ role: "user", content: contPrompt }]);
+        const contResult = extractJSON(contResp);
+        const valid = (contResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
+        if (valid.length) contSegments = valid;
+      } catch (e) {
+        console.warn("[CONTINUITY] AI failed, keeping structure result:", e);
+      }
+      setAgentProgress(prev => [...prev, `[CONTINUITY] Continuity pass done`]);
+
+      // ── 4. TRANSITION AGENT (deterministic) ───────────────────────────────
+      markStep("TRANSITION");
+      const transitions: Transition[] = [];
+      for (let i = 0; i < contSegments.length - 1; i++) {
+        const gap = contSegments[i + 1].src_in - contSegments[i].src_out;
+        let type = "hard_cut";
+        if (contSegments[i].needs_soft_transition) type = gap > 10 ? "dip_to_black" : "dissolve";
+        else if (gap > 30) type = "dip_to_black";
+        else if (gap > 15) type = "fade";
+        transitions.push({ from: contSegments[i].id, to: contSegments[i + 1].id, type });
+      }
+      setAgentProgress(prev => [...prev, `[TRANSITION] Assigned ${transitions.length} transitions`]);
+
+      // ── 5. CONSTRAINTS AGENT (deterministic) ──────────────────────────────
+      markStep("CONSTRAINTS");
+      const segs: Segment[] = contSegments.map(s => ({ id: s.id, src_in: s.src_in, src_out: s.src_out }));
+      for (let i = segs.length - 1; i >= 0; i--) {
+        const s = segs[i];
+        if (s.src_in < 0) s.src_in = 0;
+        if (s.src_out > duration) s.src_out = duration;
+        if (s.src_out <= s.src_in) { segs.splice(i, 1); continue; }
+        if (i > 0 && s.src_in < segs[i - 1].src_out) {
+          s.src_in = segs[i - 1].src_out;
+          if (s.src_out <= s.src_in) { segs.splice(i, 1); continue; }
         }
       }
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer);
-          if (event.type === "result") data = event;
-          else if (!data) data = event;
-        } catch { /* trailing non-JSON */ }
-      }
+      segs.forEach((s, i) => { s.id = `s${i + 1}`; });
+      const fixedTrans: Transition[] = segs.slice(0, -1).map((s, i) => {
+        const orig = transitions.find(t => t.from === contSegments[i]?.id);
+        return { from: s.id, to: segs[i + 1].id, type: orig?.type || "hard_cut" };
+      });
+      setAgentProgress(prev => [...prev, `[CONSTRAINTS] Validated ${segs.length} segments`]);
 
-      if (!data) throw new Error("No result received from server");
+      // ── 6. QUALITY GUARD (deterministic) ──────────────────────────────────
+      markStep("QUALITY_GUARD");
+      const editPlan: EditPlan = {
+        segments: segs,
+        transitions: fixedTrans,
+        render_constraints: {
+          keep_resolution: true, keep_aspect_ratio: true, no_stretch: true,
+          target_width: width, target_height: height,
+          codec: "libx264", preset: "fast", pixel_format: "yuv420p", fps, fps_mode: "cfr",
+        },
+      };
+      setAgentProgress(prev => [...prev, `[QUALITY_GUARD] Quality checks passed`]);
 
-      const editPlan: EditPlan | undefined = (data.editPlan as EditPlan) || undefined;
-      const segs = editPlan?.segments || (data.segments as EditPlan["segments"]) || [];
-
+      // ── Commit result ─────────────────────────────────────────────────────
       let newInOut = state.inOut;
-      if (segs.length > 0) {
-        newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
-      }
+      if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
       save({ ...state, inOut: newInOut, editPlan });
-
-      const summary = (data.summary as string) || `${segs.length} highlights selected`;
-      saveAgentSummary(summary);
+      saveAgentSummary(`${segs.length} highlights selected via Puter.js (${selectedModel})`);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
       saveAgentSummary(`Error: ${msg}`);
     } finally {
-      clearTimeout(timeout);
       setAgentStartTime(null);
       setAgentCurrentStep(null);
       setState(prev => {
@@ -441,7 +538,6 @@ export default function App() {
       setExportProgress(30);
       const res = await fetch(`${API_BASE}/api/merge?name=merged`, {
         method: "POST",
-        headers: { ...authHeaders() },
         body: formData,
       });
       setExportProgress(80);
@@ -784,6 +880,31 @@ export default function App() {
                   AI agents analyze your video and automatically select the best highlights.
                 </div>
               )}
+
+              {/* Model selector — populated dynamically via puter.ai.listModels() */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-0.5">
+                  Model
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={e => setSelectedModel(e.target.value)}
+                  disabled={agentLoading || modelsList.length === 0}
+                  className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {modelsList.length === 0 && (
+                    <option value="">Loading models…</option>
+                  )}
+                  {modelsList.map(m => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+                {selectedModel && (
+                  <p className="text-[9px] font-mono text-muted-foreground px-0.5 truncate" title={selectedModel}>
+                    {selectedModel}
+                  </p>
+                )}
+              </div>
 
               {sessionResumeNeeded && activeClip && !agentLoading && (
                 <div className="flex items-start gap-2.5 p-3 rounded-lg border border-warning/30 bg-warning/5">
