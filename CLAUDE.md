@@ -30,6 +30,7 @@ following rules MUST be followed:
    - `querystring` — Use `URLSearchParams` (built-in)
    - `node-uuid` — Use `uuid` >= 9.x
    - `nomnom` — Use `commander` or `yargs`
+   - `resolve-url` — Abandoned. Use built-in `URL` / `path` APIs instead
 
 4. **Version floors** (these packages are OK but only at modern versions):
    - `rimraf` >= 4.0.0
@@ -47,6 +48,12 @@ following rules MUST be followed:
 7. **When fixing deprecated transitive deps:** Use npm `overrides` in the root
    `package.json` to force modern versions of transitive dependencies where
    possible.
+
+## Cross-Platform Script Rules
+
+- **Never use bash/sh syntax in npm scripts.** `npm run` uses `cmd.exe` on Windows — shell-isms like `2>/dev/null`, `|| true`, `&&` chains, and `$VAR` substitution will fail.
+- Use plain `node scripts/foo.js` for any logic that needs error suppression or conditional execution.
+- Use `{ stdio: ['inherit', 'pipe', 'pipe'] }` in `child_process.execSync` calls instead of appending `2>/dev/null` to the command string.
 
 ## Code Style
 
