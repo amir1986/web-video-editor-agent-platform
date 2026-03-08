@@ -37,6 +37,7 @@ const BLOCKLIST = {
   'node-uuid':        'Renamed to uuid. Use uuid >= 9.x.',
   'nomnom':           'Deprecated. Use commander or yargs.',
   'tough-cookie':     'Versions < 5 have prototype pollution CVE.',
+  'resolve-url':      'Deprecated (abandoned). Use the built-in URL / path APIs.',
 };
 
 // Packages where only OLD versions are deprecated — flag if below threshold.
@@ -53,11 +54,23 @@ const VERSION_FLOOR = {
 // Each entry: package name → which direct dep brings it in.
 // Review this list periodically and remove entries when upstream fixes land.
 const TRANSITIVE_EXCEPTIONS = {
+  // ── request chain (node-telegram-bot-api → @cypress/request-promise) ───────
   'request':              'Transitive via node-telegram-bot-api → @cypress/request-promise.',
+  'request-promise':      'Transitive via matrix-bot-sdk (optional channel). Upgrade blocked upstream.',
   'request-promise-core': 'Transitive via node-telegram-bot-api → @cypress/request-promise.',
   'har-validator':        'Transitive via request.',
   'tough-cookie':         'Transitive via request.',
   'uuid':                 'Transitive via request (uses uuid@3). Not a direct dep.',
+  // ── whatsapp-web.js optional channel ────────────────────────────────────────
+  'fluent-ffmpeg':        'Transitive via whatsapp-web.js (optional channel). Upgrade blocked upstream.',
+  'fstream':              'Transitive via whatsapp-web.js → unzipper. Upgrade blocked upstream.',
+  'rimraf':               'Transitive via whatsapp-web.js → unzipper → fstream. Upgrade blocked upstream.',
+  'glob':                 'Transitive via whatsapp-web.js → archiver → archiver-utils. Upgrade blocked upstream.',
+  'inflight':             'Transitive via whatsapp-web.js → archiver → archiver-utils → glob. Upgrade blocked upstream.',
+  // ── multer (direct dep) ─────────────────────────────────────────────────────
+  'mkdirp':               'Transitive via multer@2 (uses mkdirp@0.5). Upgrade blocked upstream.',
+  // ── misc ────────────────────────────────────────────────────────────────────
+  'resolve-url':          'Transitive — remove package that depends on it instead of overriding.',
 };
 
 // ─── Known vulnerability exceptions (transitive, cannot fix upstream) ────────
@@ -85,9 +98,10 @@ function semverGte(installed, minimum) {
 
 function getInstalledPackages() {
   try {
-    const raw = execSync('npm ls --all --json 2>/dev/null', {
+    const raw = execSync('npm ls --all --json', {
       maxBuffer: 50 * 1024 * 1024,
       encoding: 'utf-8',
+      stdio: ['inherit', 'pipe', 'pipe'],
     });
     return JSON.parse(raw);
   } catch (e) {
@@ -190,9 +204,10 @@ function main() {
   if (runAudit) {
     console.log('Running npm audit...');
     try {
-      const auditRaw = execSync('npm audit --json 2>/dev/null', {
+      const auditRaw = execSync('npm audit --json', {
         maxBuffer: 10 * 1024 * 1024,
         encoding: 'utf-8',
+        stdio: ['inherit', 'pipe', 'pipe'],
       });
       const audit = JSON.parse(auditRaw);
       const vulns = audit.vulnerabilities || {};
@@ -240,7 +255,8 @@ function main() {
 
   for (const issue of issues) {
     const pkgName = issue.pkg.split('@')[0];
-    const isKnownTransitive = TRANSITIVE_EXCEPTIONS[pkgName] && issue.severity === 'DEPRECATED';
+    const isKnownTransitive = TRANSITIVE_EXCEPTIONS[pkgName] &&
+      (issue.severity === 'DEPRECATED' || issue.severity === 'OUTDATED');
     const isKnownAuditException = AUDIT_EXCEPTIONS.has(pkgName) && issue.severity.startsWith('VULN-');
     if (isKnownTransitive || isKnownAuditException) {
       issue.severity = isKnownTransitive ? 'WARN-TRANSITIVE' : 'WARN-VULN-KNOWN';
