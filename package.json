@@ -26,5 +26,10 @@
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
+  },
+  "overrides": {
+    "discord.js": { "undici": "6.23.0" },
+    "@discordjs/rest": { "undici": "6.23.0" },
+    "@discordjs/ws": { "undici": "6.23.0" }
   }
 }

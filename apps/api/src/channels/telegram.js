@@ -8,11 +8,8 @@
  *      TELEGRAM_API_ID, TELEGRAM_API_HASH (optional — needed for >20MB files)
  */
 
-const TelegramBot = require("node-telegram-bot-api");
+const { Bot, InputFile } = require("grammy");
 const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
 const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
 
 const MAX_BOT_API_DOWNLOAD = 20 * 1024 * 1024;
@@ -26,6 +23,7 @@ class TelegramChannel extends BaseChannel {
     this.maxUpload = MAX_UPLOAD_SIZE;
     this.bot = null;
     this.mtClient = null;
+    this._token = null;
   }
 
   async start() {
@@ -33,18 +31,22 @@ class TelegramChannel extends BaseChannel {
     const apiId = parseInt(process.env.TELEGRAM_API_ID) || 0;
     const apiHash = process.env.TELEGRAM_API_HASH || "";
 
-    this.bot = new TelegramBot(TOKEN, { polling: true });
+    this._token = TOKEN;
+    this.bot = new Bot(TOKEN);
 
-    this.bot.onText(/\/start/, (msg) => {
-      this.bot.sendMessage(msg.chat.id, "Send me a video and I'll auto-edit the highlights for you!");
+    this.bot.command("start", (ctx) => {
+      ctx.reply("Send me a video and I'll auto-edit the highlights for you!");
     });
 
-    this.bot.on("video", (msg) => this._handleVideo(msg, msg.video));
-    this.bot.on("document", (msg) => {
-      const doc = msg.document;
+    this.bot.on("message:video", (ctx) => this._handleVideo(ctx.message, ctx.message.video));
+    this.bot.on("message:document", (ctx) => {
+      const doc = ctx.message.document;
       if (!doc || !doc.mime_type?.startsWith("video/")) return;
-      this._handleVideo(msg, doc);
+      this._handleVideo(ctx.message, doc);
     });
+
+    // Start polling in background (does not block)
+    this.bot.start().catch((err) => console.error("[Telegram] Bot error:", err));
 
     console.log("Telegram bot started, waiting for videos...");
     if (apiId && apiHash) {
@@ -55,7 +57,7 @@ class TelegramChannel extends BaseChannel {
   }
 
   async stop() {
-    if (this.bot) { try { await this.bot.stopPolling(); } catch {} }
+    if (this.bot) { try { await this.bot.stop(); } catch {} }
     if (this.mtClient) { try { await this.mtClient.disconnect(); } catch {} }
   }
 
@@ -78,8 +80,11 @@ class TelegramChannel extends BaseChannel {
       return this._downloadViaMTProto(chatId, messageId, destPath, fileSize);
     }
     try {
-      const filePath = await this.bot.downloadFile(fileId, os.tmpdir());
-      fs.renameSync(filePath, destPath);
+      const file = await this.bot.api.getFile(fileId);
+      const url = `https://api.telegram.org/file/bot${this._token}/${file.file_path}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      fs.writeFileSync(destPath, Buffer.from(await resp.arrayBuffer()));
     } catch (err) {
       if (err.message?.includes("file is too big")) {
         return this._downloadViaMTProto(chatId, messageId, destPath, fileSize);
@@ -103,7 +108,7 @@ class TelegramChannel extends BaseChannel {
 
   async _handleVideo(msg, media) {
     const chatId = msg.chat.id;
-    const statusMsg = await this.bot.sendMessage(chatId, "Downloading video...");
+    const statusMsg = await this.bot.api.sendMessage(chatId, "Downloading video...");
     const tmpIn = tmpFile("mp4");
 
     try {
@@ -111,29 +116,36 @@ class TelegramChannel extends BaseChannel {
       const name = media.file_name?.replace(/\.[^/.]+$/, "") || "video";
 
       const result = await processVideo(tmpIn, name, this.maxUpload, (text) => {
-        this.bot.editMessageText(text, { chat_id: chatId, message_id: statusMsg.message_id }).catch(() => {});
+        this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
       });
 
       const compNote = result.compressed ? " (compressed for Telegram)" : "";
-      await this.bot.editMessageText(
-        `Done! ${result.segCount} highlights found${compNote}.\n${result.summary}`,
-        { chat_id: chatId, message_id: statusMsg.message_id }
+      await this.bot.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `Done! ${result.segCount} highlights found${compNote}.\n${result.summary}`
       );
 
       const caption = result.summary ? `AI Edit: ${result.summary}` : "Here's your highlight reel!";
       try {
-        await this.bot.sendVideo(chatId, result.outputPath, {
-          caption, width: result.width || undefined, height: result.height || undefined,
-          duration: result.duration || undefined, supports_streaming: true,
+        await this.bot.api.sendVideo(chatId, new InputFile(result.outputPath), {
+          caption,
+          width: result.width || undefined,
+          height: result.height || undefined,
+          duration: result.duration || undefined,
+          supports_streaming: true,
         });
       } catch {
-        await this.bot.sendDocument(chatId, result.outputPath, { caption }, { filename: `${name}_edited.mp4`, contentType: "video/mp4" });
+        await this.bot.api.sendDocument(chatId, new InputFile(result.outputPath), {
+          caption,
+          filename: `${name}_edited.mp4`,
+        });
       }
 
       cleanup(tmpIn, result._tmpOut, result._tmpCompressed);
     } catch (err) {
       console.error("[Telegram] Error:", err);
-      await this.bot.editMessageText(`Error: ${err.message}`, { chat_id: chatId, message_id: statusMsg.message_id }).catch(() => {});
+      await this.bot.api.editMessageText(chatId, statusMsg.message_id, `Error: ${err.message}`).catch(() => {});
       cleanup(tmpIn);
     }
   }
