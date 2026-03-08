@@ -328,12 +328,27 @@ export default function App() {
       return next;
     });
 
+    // ── Ensure Puter.js is authenticated before running agents ───────────────
+    // puter.ai.chat() triggers an OAuth popup automatically on the first call
+    // if the user is not signed in. We pre-check so we can surface a clear
+    // error rather than silently falling back to deterministic segments.
+    try {
+      const signedIn = await puter.auth.isLoggedIn();
+      if (!signedIn) {
+        await puter.auth.signIn(); // shows OAuth popup
+      }
+    } catch (authErr) {
+      throw new Error("Puter sign-in required to run AI agents. Please allow the popup and try again.");
+    }
+
     // ── Helper: stream one Puter AI turn and return the full text ────────────
     const puterChat = async (messages: { role: string; content: any }[]): Promise<string> => {
       const stream = await puter.ai.chat(messages, { model: selectedModel, stream: true });
       let text = "";
       for await (const part of stream) {
-        text += part?.text ?? "";
+        // Puter Claude chunks expose `.text`; guard against other shapes
+        if (typeof part?.text === "string") text += part.text;
+        else if (typeof part === "string") text += part;
       }
       return text;
     };
@@ -436,16 +451,17 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
 
       // ── 4. TRANSITION AGENT (deterministic) ───────────────────────────────
       markStep("TRANSITION");
-      const transitions: Transition[] = [];
+      // Use agentTransitions to avoid shadowing the outer `transitions` variable
+      const agentTransitions: Transition[] = [];
       for (let i = 0; i < contSegments.length - 1; i++) {
         const gap = contSegments[i + 1].src_in - contSegments[i].src_out;
         let type = "hard_cut";
         if (contSegments[i].needs_soft_transition) type = gap > 10 ? "dip_to_black" : "dissolve";
         else if (gap > 30) type = "dip_to_black";
         else if (gap > 15) type = "fade";
-        transitions.push({ from: contSegments[i].id, to: contSegments[i + 1].id, type });
+        agentTransitions.push({ from: contSegments[i].id, to: contSegments[i + 1].id, type });
       }
-      setAgentProgress(prev => [...prev, `[TRANSITION] Assigned ${transitions.length} transitions`]);
+      setAgentProgress(prev => [...prev, `[TRANSITION] Assigned ${agentTransitions.length} transitions`]);
 
       // ── 5. CONSTRAINTS AGENT (deterministic) ──────────────────────────────
       markStep("CONSTRAINTS");
@@ -462,7 +478,8 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       }
       segs.forEach((s, i) => { s.id = `s${i + 1}`; });
       const fixedTrans: Transition[] = segs.slice(0, -1).map((s, i) => {
-        const orig = transitions.find(t => t.from === contSegments[i]?.id);
+        // Map using agentTransitions — which was built from contSegments ids
+        const orig = agentTransitions.find(t => t.from === contSegments[i]?.id);
         return { from: s.id, to: segs[i + 1].id, type: orig?.type || "hard_cut" };
       });
       setAgentProgress(prev => [...prev, `[CONSTRAINTS] Validated ${segs.length} segments`]);
