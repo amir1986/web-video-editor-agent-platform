@@ -1,7 +1,8 @@
 /**
  * WhatsApp channel adapter
  *
- * Uses whatsapp-web.js which runs a real WhatsApp Web session via Puppeteer.
+ * Uses @whiskeysockets/baileys — native WebSocket implementation of WhatsApp
+ * Multi-Device protocol. No Chromium/Puppeteer required.
  * Requires a one-time QR code scan to authenticate.
  *
  * Env: WHATSAPP_ENABLED=true (required — opt-in because it needs QR auth)
@@ -21,78 +22,90 @@ class WhatsAppChannel extends BaseChannel {
     this.name = "WhatsApp";
     this.envKeys = ["WHATSAPP_ENABLED"];
     this.maxUpload = MAX_UPLOAD;
-    this.client = null;
+    this.sock = null;
   }
 
   async start() {
-    const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
-    this._MessageMedia = MessageMedia;
+    const {
+      default: makeWASocket,
+      DisconnectReason,
+      useMultiFileAuthState,
+      downloadMediaMessage,
+    } = require("@whiskeysockets/baileys");
 
-    this.client = new Client({
-      authStrategy: new LocalAuth({ dataPath: ".wwebjs_auth" }),
-      puppeteer: { headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+    this._downloadMediaMessage = downloadMediaMessage;
+
+    const { state, saveCreds } = await useMultiFileAuthState(".wwebjs_auth/baileys");
+
+    this.sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: true,
     });
 
-    this.client.on("qr", (qr) => {
-      console.log("[WhatsApp] Scan QR code to authenticate:");
-      // Print QR in terminal using qrcode-terminal if available
-      try {
-        require("qrcode-terminal").generate(qr, { small: true });
-      } catch {
-        console.log(`[WhatsApp] QR: ${qr}`);
+    this.sock.ev.on("creds.update", saveCreds);
+
+    this.sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+      if (connection === "open") {
+        console.log("WhatsApp client ready");
+      } else if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log("[WhatsApp] Connection closed, reconnect:", shouldReconnect);
+        if (shouldReconnect) this.start().catch(console.error);
       }
     });
 
-    this.client.on("ready", () => {
-      console.log("WhatsApp client ready");
+    this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const msg of messages) {
+        if (!msg.message || msg.key.fromMe) continue;
+        const msgType = Object.keys(msg.message)[0];
+        if (msgType === "videoMessage" || msgType === "documentMessage") {
+          await this._handleVideo(msg).catch((err) =>
+            console.error("[WhatsApp] Unhandled error:", err)
+          );
+        }
+      }
     });
-
-    this.client.on("message", async (msg) => {
-      if (!msg.hasMedia) return;
-      // Only process video messages
-      if (msg.type !== "video" && msg.type !== "document") return;
-
-      const media = await msg.downloadMedia();
-      if (!media || !media.mimetype?.startsWith("video/")) return;
-
-      await this._handleVideo(msg, media);
-    });
-
-    await this.client.initialize();
   }
 
   async stop() {
-    if (this.client) { try { await this.client.destroy(); } catch {} }
+    if (this.sock) {
+      try { this.sock.end(); } catch {}
+    }
   }
 
-  async _handleVideo(msg, media) {
-    const chat = await msg.getChat();
+  async _handleVideo(msg) {
+    const jid = msg.key.remoteJid;
     const tmpIn = tmpFile("mp4");
 
-    await chat.sendMessage("Downloading video...");
+    await this.sock.sendMessage(jid, { text: "Downloading video..." });
 
     try {
-      // Write media buffer to file
-      const buffer = Buffer.from(media.data, "base64");
+      const buffer = await this._downloadMediaMessage(msg, "buffer", {});
       fs.writeFileSync(tmpIn, buffer);
 
-      const name = media.filename?.replace(/\.[^/.]+$/, "") || "video";
+      const videoMsg = msg.message.videoMessage || msg.message.documentMessage;
+      const name = (videoMsg?.fileName || "video").replace(/\.[^/.]+$/, "");
 
       const result = await processVideo(tmpIn, name, this.maxUpload, (text) => {
-        chat.sendMessage(text).catch(() => {});
+        this.sock.sendMessage(jid, { text }).catch(() => {});
       });
 
       const caption = result.summary
         ? `AI Edit: ${result.summary}`
         : "Here's your highlight reel!";
 
-      const resultMedia = this._MessageMedia.fromFilePath(result.outputPath);
-      await chat.sendMessage(resultMedia, { caption, sendMediaAsDocument: result.compressed });
+      await this.sock.sendMessage(jid, {
+        video: fs.readFileSync(result.outputPath),
+        caption,
+        mimetype: "video/mp4",
+      });
 
       cleanup(tmpIn, result._tmpOut, result._tmpCompressed);
     } catch (err) {
       console.error("[WhatsApp] Error:", err);
-      await chat.sendMessage(`Error: ${err.message}`).catch(() => {});
+      await this.sock.sendMessage(jid, { text: `Error: ${err.message}` }).catch(() => {});
       cleanup(tmpIn);
     }
   }
