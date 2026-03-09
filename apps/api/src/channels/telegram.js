@@ -67,10 +67,19 @@ class TelegramChannel extends BaseChannel {
     const apiHash = process.env.TELEGRAM_API_HASH || "";
     if (!apiId || !apiHash) return null;
 
-    const { TelegramClient } = require("telegram");
+    const { TelegramClient, Api } = require("telegram");
     const { StringSession } = require("telegram/sessions");
+    // Use connect() instead of start() to avoid spawning an update loop.
+    // The update loop causes constant TIMEOUT errors when used in bot mode
+    // since we never consume updates via MTProto — grammy handles that.
     this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
-    await this.mtClient.start({ botAuthToken: process.env.TELEGRAM_BOT_TOKEN });
+    await this.mtClient.connect();
+    await this.mtClient.invoke(new Api.auth.ImportBotAuthorization({
+      flags: 0,
+      apiId,
+      apiHash,
+      botAuthToken: process.env.TELEGRAM_BOT_TOKEN,
+    }));
     console.log("[MTProto] Client connected for large file downloads");
     return this.mtClient;
   }
