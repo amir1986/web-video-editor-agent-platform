@@ -70,11 +70,12 @@ class TelegramChannel extends BaseChannel {
     const { TelegramClient, Api } = require("telegram");
     const { StringSession } = require("telegram/sessions");
     this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
-    // GramJS starts the update loop inside connect() itself. Patch it to a
-    // no-op BEFORE connect() so the loop never fires. This client is only
-    // used for downloading large files; grammy handles incoming updates via
-    // Bot API polling, so MTProto updates are completely unnecessary.
-    this.mtClient._updateLoop = async () => {};
+    // GramJS calls _updateLoop via a direct module reference inside connect(),
+    // so instance-level patches are bypassed. It checks `this._loopStarted`
+    // before spawning the loop — setting it to true skips the loop entirely.
+    // This client is only used for file downloads; grammy handles updates.
+    this.mtClient._loopStarted = true;
+    this.mtClient._updateLoop = async () => {}; // belt-and-suspenders
     await this.mtClient.connect();
     await this.mtClient.invoke(new Api.auth.ImportBotAuthorization({
       flags: 0,
