@@ -86,6 +86,21 @@ class TelegramChannel extends BaseChannel {
       apiHash,
       botAuthToken: process.env.TELEGRAM_BOT_TOKEN,
     }));
+
+    // After connect(), GramJS has all DC configs in the session (populated by
+    // help.GetConfig). Force port 80 for every DC so that _borrowExportedSender
+    // (used for cross-DC file downloads) never tries port 443, which is blocked
+    // by some ISPs and firewalls.
+    for (let dcId = 1; dcId <= 5; dcId++) {
+      try {
+        const dc = this.mtClient.session.getDC(dcId);
+        if (dc && dc.port !== 80) {
+          this.mtClient.session.setDC(dcId, dc.serverAddress || dc.ipAddress, 80);
+          console.log(`[MTProto] DC${dcId}: forced port ${dc.port} → 80`);
+        }
+      } catch {}
+    }
+
     console.log("[MTProto] Client connected for large file downloads");
     return this.mtClient;
   }
@@ -109,16 +124,36 @@ class TelegramChannel extends BaseChannel {
   }
 
   async _downloadViaMTProto(chatId, messageId, destPath, fileSize) {
-    const client = await this._getMTClient();
-    if (!client) {
-      throw new Error("File is >20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH for large file support.");
-    }
     const sizeMB = fileSize ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB` : "unknown";
-    console.log(`[MTProto] Downloading large file (${sizeMB})...`);
-    const messages = await client.getMessages(chatId, { ids: [messageId] });
-    if (!messages?.[0]) throw new Error("Could not retrieve message via MTProto");
-    const buffer = await client.downloadMedia(messages[0]);
-    fs.writeFileSync(destPath, buffer);
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const client = await this._getMTClient();
+      if (!client) {
+        throw new Error("File is >20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH for large file support.");
+      }
+      console.log(`[MTProto] Downloading large file (${sizeMB})... attempt ${attempt}`);
+      const messages = await client.getMessages(chatId, { ids: [messageId] });
+      if (!messages?.[0]) throw new Error("Could not retrieve message via MTProto");
+
+      try {
+        // GramJS _borrowExportedSender recurses forever when the file DC is
+        // unreachable. Race against a 5-minute hard timeout to break the loop.
+        const buffer = await Promise.race([
+          client.downloadMedia(messages[0]),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("MTProto download timed out after 5 min")), 5 * 60 * 1000)
+          ),
+        ]);
+        fs.writeFileSync(destPath, buffer);
+        return;
+      } catch (err) {
+        console.error(`[MTProto] Download attempt ${attempt} failed: ${err.message}`);
+        // Discard the broken client so next attempt starts fresh
+        if (this.mtClient) { try { await this.mtClient.disconnect(); } catch {} }
+        this.mtClient = null;
+        if (attempt === 2) throw err;
+      }
+    }
   }
 
   async _handleVideo(msg, media) {
