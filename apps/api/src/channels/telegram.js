@@ -79,6 +79,16 @@ class TelegramChannel extends BaseChannel {
     // This client is only used for file downloads; grammy handles updates.
     this.mtClient._loopStarted = true;
     this.mtClient._updateLoop = async () => {}; // belt-and-suspenders
+    // GramJS's getDC() hardcodes port 443 in its return value regardless of
+    // session settings. Override the method on this instance to force port 80
+    // so that _borrowExportedSender (cross-DC file downloads) never tries 443.
+    const _origGetDC = this.mtClient.getDC.bind(this.mtClient);
+    this.mtClient.getDC = async (...args) => {
+      const dc = await _origGetDC(...args);
+      return { ...dc, port: 80 };
+    };
+    console.log("[MTProto] getDC patched: all DC connections will use port 80");
+
     await this.mtClient.connect();
     await this.mtClient.invoke(new Api.auth.ImportBotAuthorization({
       flags: 0,
@@ -86,20 +96,6 @@ class TelegramChannel extends BaseChannel {
       apiHash,
       botAuthToken: process.env.TELEGRAM_BOT_TOKEN,
     }));
-
-    // After connect(), GramJS has all DC configs in the session (populated by
-    // help.GetConfig). Force port 80 for every DC so that _borrowExportedSender
-    // (used for cross-DC file downloads) never tries port 443, which is blocked
-    // by some ISPs and firewalls.
-    for (let dcId = 1; dcId <= 5; dcId++) {
-      try {
-        const dc = this.mtClient.session.getDC(dcId);
-        if (dc && dc.port !== 80) {
-          this.mtClient.session.setDC(dcId, dc.serverAddress || dc.ipAddress, 80);
-          console.log(`[MTProto] DC${dcId}: forced port ${dc.port} → 80`);
-        }
-      } catch {}
-    }
 
     console.log("[MTProto] Client connected for large file downloads");
     return this.mtClient;
