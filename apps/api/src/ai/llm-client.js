@@ -20,6 +20,11 @@ const TEXT_MODEL = process.env.TEXT_MODEL || VISION_MODEL;
 // Auto-detect: use Claude if API key is present, otherwise Ollama
 const LLM_PROVIDER = ANTHROPIC_API_KEY ? "claude" : "ollama";
 
+// Use undici directly so we can set headersTimeout/bodyTimeout beyond the
+// 30-second undici default. Claude vision calls can take 60–120s.
+const { Agent, fetch: undiciFetch } = require("undici");
+const LLM_AGENT = new Agent({ headersTimeout: 5 * 60 * 1000, bodyTimeout: 5 * 60 * 1000 });
+
 // ---------------------------------------------------------------------------
 // Retry with exponential backoff (cookbook pattern)
 // ---------------------------------------------------------------------------
@@ -51,7 +56,7 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
     { role: "system", content: systemPrompt },
     { role: "user", content: userContent },
   ];
-  const res = await fetch(OLLAMA_URL, {
+  const res = await undiciFetch(OLLAMA_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -60,6 +65,7 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
       temperature,
       stream: false,
     }),
+    dispatcher: LLM_AGENT,
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
@@ -106,10 +112,11 @@ async function claudeRequest(systemPrompt, userContent, options = {}) {
     headers["anthropic-beta"] = "prompt-caching-2024-07-31";
   }
 
-  const res = await fetch(CLAUDE_API_URL, {
+  const res = await undiciFetch(CLAUDE_API_URL, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    dispatcher: LLM_AGENT,
   });
 
   if (!res.ok) {
@@ -193,7 +200,7 @@ async function claudeAgentLoop(systemPrompt, userContent, tools, toolHandlers, o
     };
     if (enableCaching) headers["anthropic-beta"] = "prompt-caching-2024-07-31";
 
-    const res = await fetch(CLAUDE_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+    const res = await undiciFetch(CLAUDE_API_URL, { method: "POST", headers, body: JSON.stringify(body), dispatcher: LLM_AGENT });
     if (!res.ok) throw new Error(`Claude API HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
@@ -302,7 +309,7 @@ async function* claudeStream(systemPrompt, userContent, options = {}) {
   };
   if (enableCaching) headers["anthropic-beta"] = "prompt-caching-2024-07-31";
 
-  const res = await fetch(CLAUDE_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await undiciFetch(CLAUDE_API_URL, { method: "POST", headers, body: JSON.stringify(body), dispatcher: LLM_AGENT });
   if (!res.ok) throw new Error(`Claude stream HTTP ${res.status}`);
 
   const reader = res.body.getReader();
