@@ -15,6 +15,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
+const { Agent, fetch: undiciFetch } = require("undici");
 
 const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 const API_URL = process.env.API_URL || "http://localhost:3001";
@@ -118,16 +119,16 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
     onProgress("Processing with AI... this may take a minute.");
 
     const videoBuffer = fs.readFileSync(inputPath);
-    const fetchCtrl = new AbortController();
-    const fetchTimeout = setTimeout(() => fetchCtrl.abort(), 10 * 60 * 1000);
-
-    const res = await fetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`, {
+    // Use undici directly so we can set headersTimeout + bodyTimeout beyond
+    // undici's 30s default. The API calls Claude which can take several minutes
+    // on large files, so we need 10–15 min timeouts here.
+    const agent = new Agent({ headersTimeout: 10 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 });
+    const res = await undiciFetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`, {
       method: "POST",
       headers: { "Content-Type": "video/mp4" },
       body: videoBuffer,
-      signal: fetchCtrl.signal,
+      dispatcher: agent,
     });
-    clearTimeout(fetchTimeout);
 
     if (!res.ok) {
       const err = await res.text();
