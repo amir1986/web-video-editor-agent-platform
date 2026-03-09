@@ -32,7 +32,10 @@ class TelegramChannel extends BaseChannel {
     const apiHash = process.env.TELEGRAM_API_HASH || "";
 
     this._token = TOKEN;
-    this.bot = new Bot(TOKEN);
+    // Set explicit timeouts: 500s for large file uploads, 30s for regular calls.
+    // Without this grammy uses node-fetch with no timeout, causing sendVideo
+    // to hang indefinitely when the Telegram connection goes stale mid-upload.
+    this.bot = new Bot(TOKEN, { client: { timeoutSeconds: 500 } });
 
     this.bot.command("start", (ctx) => {
       ctx.reply("Send me a video and I'll auto-edit the highlights for you!");
@@ -139,6 +142,8 @@ class TelegramChannel extends BaseChannel {
       ).catch(() => {});
 
       const caption = result.summary ? `AI Edit: ${result.summary}` : "Here's your highlight reel!";
+      const uploadCtrl = new AbortController();
+      const uploadTimeout = setTimeout(() => uploadCtrl.abort(), 10 * 60 * 1000);
       try {
         await this.bot.api.sendVideo(chatId, new InputFile(result.outputPath), {
           caption,
@@ -146,12 +151,14 @@ class TelegramChannel extends BaseChannel {
           height: result.height || undefined,
           duration: result.duration || undefined,
           supports_streaming: true,
-        });
+        }, { signal: uploadCtrl.signal });
       } catch {
         await this.bot.api.sendDocument(chatId, new InputFile(result.outputPath), {
           caption,
           filename: `${name}_edited.mp4`,
-        });
+        }, { signal: uploadCtrl.signal });
+      } finally {
+        clearTimeout(uploadTimeout);
       }
 
       cleanup(tmpIn, result._tmpOut, result._tmpCompressed);
