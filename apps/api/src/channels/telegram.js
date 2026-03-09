@@ -136,7 +136,7 @@ class TelegramChannel extends BaseChannel {
         chatId,
         statusMsg.message_id,
         `Done! ${result.segCount} highlights found${compNote}.\n${result.summary}`
-      );
+      ).catch(() => {});
 
       const caption = result.summary ? `AI Edit: ${result.summary}` : "Here's your highlight reel!";
       try {
