@@ -86,6 +86,21 @@ class TelegramChannel extends BaseChannel {
       apiHash,
       botAuthToken: process.env.TELEGRAM_BOT_TOKEN,
     }));
+
+    // After connect(), GramJS has all DC configs in the session (populated by
+    // help.GetConfig). Force port 80 for every DC so that _borrowExportedSender
+    // (used for cross-DC file downloads) never tries port 443, which is blocked
+    // by some ISPs and firewalls.
+    for (let dcId = 1; dcId <= 5; dcId++) {
+      try {
+        const dc = this.mtClient.session.getDC(dcId);
+        if (dc && dc.port !== 80) {
+          this.mtClient.session.setDC(dcId, dc.serverAddress || dc.ipAddress, 80);
+          console.log(`[MTProto] DC${dcId}: forced port ${dc.port} → 80`);
+        }
+      } catch {}
+    }
+
     console.log("[MTProto] Client connected for large file downloads");
     return this.mtClient;
   }
