@@ -69,10 +69,12 @@ class TelegramChannel extends BaseChannel {
 
     const { TelegramClient, Api } = require("telegram");
     const { StringSession } = require("telegram/sessions");
-    // Use connect() instead of start() to avoid spawning an update loop.
-    // The update loop causes constant TIMEOUT errors when used in bot mode
-    // since we never consume updates via MTProto — grammy handles that.
     this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
+    // GramJS starts the update loop inside connect() itself. Patch it to a
+    // no-op BEFORE connect() so the loop never fires. This client is only
+    // used for downloading large files; grammy handles incoming updates via
+    // Bot API polling, so MTProto updates are completely unnecessary.
+    this.mtClient._updateLoop = async () => {};
     await this.mtClient.connect();
     await this.mtClient.invoke(new Api.auth.ImportBotAuthorization({
       flags: 0,
