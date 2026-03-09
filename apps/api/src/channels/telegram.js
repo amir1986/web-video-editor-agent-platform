@@ -182,12 +182,12 @@ class TelegramChannel extends BaseChannel {
           height: result.height || undefined,
           duration: result.duration || undefined,
           supports_streaming: true,
-        }, { signal: uploadCtrl.signal });
+        }, uploadCtrl.signal);
       } catch {
         await this.bot.api.sendDocument(chatId, new InputFile(result.outputPath), {
           caption,
           filename: `${name}_edited.mp4`,
-        }, { signal: uploadCtrl.signal });
+        }, uploadCtrl.signal);
       } finally {
         clearTimeout(uploadTimeout);
       }
