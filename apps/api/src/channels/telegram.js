@@ -48,6 +48,11 @@ class TelegramChannel extends BaseChannel {
       this._handleVideo(ctx.message, doc);
     });
 
+    // Catch errors from middleware so a single handler failure doesn't stop polling.
+    this.bot.catch((err) => {
+      console.error("[Telegram] Handler error:", err.error ?? err);
+    });
+
     // Start polling in background (does not block)
     this.bot.start().catch((err) => console.error("[Telegram] Bot error:", err));
 
@@ -75,31 +80,34 @@ class TelegramChannel extends BaseChannel {
     // connectionRetries: 0 — let _borrowExportedSender fail fast on DC drops
     // instead of the built-in 30-second "sender already has hanging states" loop.
     // Our outer retry loop in _downloadViaMTProto handles retries with a fresh client.
-    this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 0 });
+    const client = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 0 });
     // GramJS calls _updateLoop via a direct module reference inside connect(),
     // so instance-level patches are bypassed. It checks `this._loopStarted`
     // before spawning the loop — setting it to true skips the loop entirely.
     // This client is only used for file downloads; grammy handles updates.
-    this.mtClient._loopStarted = true;
-    this.mtClient._updateLoop = async () => {}; // belt-and-suspenders
+    client._loopStarted = true;
+    client._updateLoop = async () => {}; // belt-and-suspenders
     // GramJS's getDC() hardcodes port 443 in its return value regardless of
     // session settings. Override the method on this instance to force port 80
     // so that _borrowExportedSender (cross-DC file downloads) never tries 443.
-    const _origGetDC = this.mtClient.getDC.bind(this.mtClient);
-    this.mtClient.getDC = async (...args) => {
+    const _origGetDC = client.getDC.bind(client);
+    client.getDC = async (...args) => {
       const dc = await _origGetDC(...args);
       return { ...dc, port: 80 };
     };
     console.log("[MTProto] getDC patched: all DC connections will use port 80");
 
-    await this.mtClient.connect();
-    await this.mtClient.invoke(new Api.auth.ImportBotAuthorization({
+    // Only cache the client after connect() succeeds — don't let a broken
+    // client get cached and reused on subsequent calls.
+    await client.connect();
+    await client.invoke(new Api.auth.ImportBotAuthorization({
       flags: 0,
       apiId,
       apiHash,
       botAuthToken: process.env.TELEGRAM_BOT_TOKEN,
     }));
 
+    this.mtClient = client;
     console.log("[MTProto] Client connected for large file downloads");
     return this.mtClient;
   }
@@ -129,30 +137,28 @@ class TelegramChannel extends BaseChannel {
     const STALL_MS = 2 * 60 * 1000; // 2 min no progress → stall
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const client = await this._getMTClient();
-      if (!client) {
-        throw new Error("File is >20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH for large file support.");
-      }
-      console.log(`[MTProto] Downloading large file (${sizeMB})... attempt ${attempt}`);
-      const messages = await client.getMessages(chatId, { ids: [messageId] });
-      if (!messages?.[0]) throw new Error("Could not retrieve message via MTProto");
-
-      let lastProgressAt = Date.now();
       let stallTimer;
-      let stallReject;
-      const stallPromise = new Promise((_, reject) => {
-        stallReject = reject;
-        const check = () => {
-          if (Date.now() - lastProgressAt > STALL_MS) {
-            reject(new Error(`MTProto download stalled (no progress for ${STALL_MS / 60000} min)`));
-          } else {
-            stallTimer = setTimeout(check, 10_000);
-          }
-        };
-        stallTimer = setTimeout(check, 10_000);
-      });
-
       try {
+        const client = await this._getMTClient();
+        if (!client) {
+          throw new Error("File is >20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH for large file support.");
+        }
+        console.log(`[MTProto] Downloading large file (${sizeMB})... attempt ${attempt}`);
+        const messages = await client.getMessages(chatId, { ids: [messageId] });
+        if (!messages?.[0]) throw new Error("Could not retrieve message via MTProto");
+
+        let lastProgressAt = Date.now();
+        const stallPromise = new Promise((_, reject) => {
+          const check = () => {
+            if (Date.now() - lastProgressAt > STALL_MS) {
+              reject(new Error(`MTProto download stalled (no progress for ${STALL_MS / 60000} min)`));
+            } else {
+              stallTimer = setTimeout(check, 10_000);
+            }
+          };
+          stallTimer = setTimeout(check, 10_000);
+        });
+
         const buffer = await Promise.race([
           client.downloadMedia(messages[0], {
             progressCallback: (received, total) => {

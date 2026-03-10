@@ -86,6 +86,13 @@ async function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
+// GramJS can emit unhandled rejections from internal background tasks
+// (keepalive, DC monitoring) when a connection fails fast with connectionRetries:0.
+// Catch and log them instead of crashing the process.
+process.on("unhandledRejection", (reason) => {
+  console.error("[bot] Unhandled rejection (suppressed):", reason?.message ?? reason);
+});
+
 main().catch((err) => {
   console.error("Fatal:", err);
   process.exit(1);
