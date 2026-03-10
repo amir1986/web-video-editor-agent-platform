@@ -72,7 +72,10 @@ class TelegramChannel extends BaseChannel {
 
     const { TelegramClient, Api } = require("telegram");
     const { StringSession } = require("telegram/sessions");
-    this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
+    // connectionRetries: 0 — let _borrowExportedSender fail fast on DC drops
+    // instead of the built-in 30-second "sender already has hanging states" loop.
+    // Our outer retry loop in _downloadViaMTProto handles retries with a fresh client.
+    this.mtClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 0 });
     // GramJS calls _updateLoop via a direct module reference inside connect(),
     // so instance-level patches are bypassed. It checks `this._loopStarted`
     // before spawning the loop — setting it to true skips the loop entirely.
@@ -121,8 +124,11 @@ class TelegramChannel extends BaseChannel {
 
   async _downloadViaMTProto(chatId, messageId, destPath, fileSize) {
     const sizeMB = fileSize ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB` : "unknown";
+    // How long with zero progress before we declare a stall.
+    // DC2 can be slow but as long as bytes are flowing we keep going.
+    const STALL_MS = 2 * 60 * 1000; // 2 min no progress → stall
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       const client = await this._getMTClient();
       if (!client) {
         throw new Error("File is >20MB. Set TELEGRAM_API_ID and TELEGRAM_API_HASH for large file support.");
@@ -131,23 +137,49 @@ class TelegramChannel extends BaseChannel {
       const messages = await client.getMessages(chatId, { ids: [messageId] });
       if (!messages?.[0]) throw new Error("Could not retrieve message via MTProto");
 
+      let lastProgressAt = Date.now();
+      let stallTimer;
+      let stallReject;
+      const stallPromise = new Promise((_, reject) => {
+        stallReject = reject;
+        const check = () => {
+          if (Date.now() - lastProgressAt > STALL_MS) {
+            reject(new Error(`MTProto download stalled (no progress for ${STALL_MS / 60000} min)`));
+          } else {
+            stallTimer = setTimeout(check, 10_000);
+          }
+        };
+        stallTimer = setTimeout(check, 10_000);
+      });
+
       try {
-        // GramJS _borrowExportedSender recurses forever when the file DC is
-        // unreachable. Race against a 5-minute hard timeout to break the loop.
         const buffer = await Promise.race([
-          client.downloadMedia(messages[0]),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("MTProto download timed out after 5 min")), 5 * 60 * 1000)
-          ),
+          client.downloadMedia(messages[0], {
+            progressCallback: (received, total) => {
+              lastProgressAt = Date.now();
+              if (total > 0) {
+                const pct = ((received / total) * 100).toFixed(0);
+                process.stdout.write(`\r[MTProto] Progress: ${pct}% (${(received / 1024 / 1024).toFixed(1)}/${(total / 1024 / 1024).toFixed(1)} MB)`);
+              }
+            },
+          }),
+          stallPromise,
         ]);
+        clearTimeout(stallTimer);
+        process.stdout.write("\n");
         fs.writeFileSync(destPath, buffer);
         return;
       } catch (err) {
+        clearTimeout(stallTimer);
+        process.stdout.write("\n");
         console.error(`[MTProto] Download attempt ${attempt} failed: ${err.message}`);
-        // Discard the broken client so next attempt starts fresh
+        // Fully disconnect before nulling so old borrowed senders stop before
+        // the next attempt creates new connections (avoids parallel DC floods).
         if (this.mtClient) { try { await this.mtClient.disconnect(); } catch {} }
         this.mtClient = null;
-        if (attempt === 2) throw err;
+        if (attempt === 3) throw err;
+        // Brief cooldown so GramJS internals can finish tearing down sockets
+        await new Promise((r) => setTimeout(r, 5000));
       }
     }
   }
