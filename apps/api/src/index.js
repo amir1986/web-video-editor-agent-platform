@@ -624,12 +624,15 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
     res.set("X-Video-Width", String(videoMeta.width));
     res.set("X-Video-Height", String(videoMeta.height));
     res.set("X-Video-Duration", String(Math.round(finalDuration)));
-    res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
+    res.sendFile(tmpOut, (err) => {
+      if (err) console.error("[AUTO-EDIT] sendFile error:", err.message);
+      cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    });
   } catch (err) {
     cleanup(tmpIn, tmpOut);
     try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     console.error("[AUTO-EDIT ERROR]", err);
-    res.status(500).json({ error: "Auto-edit failed" });
+    if (!res.headersSent) res.status(500).json({ error: "Auto-edit failed" });
   }
 });
 
