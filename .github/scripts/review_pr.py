@@ -1,22 +1,23 @@
-import os, requests, anthropic
+import os, json, urllib.request
 
 # Get environment variables
-api_key    = os.environ['ANTHROPIC_API_KEY']
+ollama_url = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 gh_token   = os.environ['GITHUB_TOKEN']
 pr_number  = os.environ['PR_NUMBER']
 repo       = os.environ['REPO']
 
 # Fetch the PR diff from GitHub
-headers = {'Authorization': f'token {gh_token}', 'Accept': 'application/vnd.github.diff'}
-diff_url = f'https://api.github.com/repos/{repo}/pulls/{pr_number}'
-diff = requests.get(diff_url, headers=headers).text
+req = urllib.request.Request(
+    f'https://api.github.com/repos/{repo}/pulls/{pr_number}',
+    headers={'Authorization': f'token {gh_token}', 'Accept': 'application/vnd.github.diff'},
+)
+with urllib.request.urlopen(req) as resp:
+    diff = resp.read().decode()
 
-# Send diff to Claude for review
-client = anthropic.Anthropic(api_key=api_key)
-message = client.messages.create(
-    model='claude-opus-4-6',
-    max_tokens=1024,
-    messages=[{
+# Send diff to Qwen for review
+payload = json.dumps({
+    'model': os.environ.get('OLLAMA_MODEL', 'qwen2.5:7b'),
+    'messages': [{
         'role': 'user',
         'content': f'''Review this pull request diff. Check for:
         - Security issues or vulnerabilities
@@ -27,14 +28,26 @@ message = client.messages.create(
 
         DIFF:
         {diff[:8000]}'''
-    }]
-)
+    }],
+    'stream': False,
+}).encode()
 
-review_text = message.content[0].text
+req2 = urllib.request.Request(
+    f'{ollama_url}/v1/chat/completions',
+    data=payload,
+    headers={'Content-Type': 'application/json'},
+)
+with urllib.request.urlopen(req2) as resp:
+    data = json.loads(resp.read())
+
+review_text = data['choices'][0]['message']['content']
 
 # Post the review as a comment on the PR
 comment_url = f'https://api.github.com/repos/{repo}/issues/{pr_number}/comments'
-headers2 = {'Authorization': f'token {gh_token}', 'Content-Type': 'application/json'}
-body = f'## 🤖 Claude AI Review\n\n{review_text}'
-requests.post(comment_url, headers=headers2, json={'body': body})
+comment_req = urllib.request.Request(
+    comment_url,
+    data=json.dumps({'body': f'## AI Review\n\n{review_text}'}).encode(),
+    headers={'Authorization': f'token {gh_token}', 'Content-Type': 'application/json'},
+)
+urllib.request.urlopen(comment_req)
 print('Review posted successfully!')

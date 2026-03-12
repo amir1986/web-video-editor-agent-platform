@@ -58,7 +58,8 @@ async function main() {
 
   if (started.length === 0) {
     console.log("");
-    console.log("No channels started. Set environment variables to enable channels:");
+    console.log("No channels configured — bot is idle.");
+    console.log("Set environment variables to enable channels:");
     console.log("  Telegram:      TELEGRAM_BOT_TOKEN");
     console.log("  Discord:       DISCORD_BOT_TOKEN");
     console.log("  Slack:         SLACK_BOT_TOKEN + SLACK_APP_TOKEN");
@@ -71,7 +72,10 @@ async function main() {
     console.log("  WebChat:       WEBCHAT_ENABLED=true");
     console.log("  Zalo OA:       ZALO_OA_ACCESS_TOKEN");
     console.log("  Zalo Personal: ZALO_PERSONAL_ACCESS_TOKEN");
-    process.exit(1);
+    console.log("");
+    console.log("Bot will stay idle until channels are configured.");
+    // Stay alive so `npm run dev` (concurrently) doesn't flag a failure.
+    // The process will be stopped when the parent sends SIGINT/SIGTERM.
   }
 
   console.log("");

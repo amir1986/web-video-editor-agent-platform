@@ -15,7 +15,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
-const { Agent, fetch: undiciFetch } = require("undici");
+const http = require("http");
 
 const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 const API_URL = process.env.API_URL || "http://localhost:3001";
@@ -119,30 +119,44 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
     onProgress("Processing with AI... this may take a minute.");
 
     const videoBuffer = fs.readFileSync(inputPath);
-    // Use undici directly so we can set headersTimeout + bodyTimeout beyond
-    // undici's 30s default. The API calls Claude which can take several minutes
-    // on large files, so we need 10–15 min timeouts here.
-    const agent = new Agent({ headersTimeout: 10 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 });
-    const res = await undiciFetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`, {
-      method: "POST",
-      headers: { "Content-Type": "video/mp4" },
-      body: videoBuffer,
-      dispatcher: agent,
+    // Use Node's built-in http.request with generous timeouts.
+    // The API calls the LLM which can take several minutes on large files.
+    console.log(`[PROCESS] Sending to API: ${API_URL}/api/auto-edit`);
+    const { statusCode, headers: resHeaders, body: resBody } = await new Promise((resolve, reject) => {
+      const url = new URL(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`);
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers: { "Content-Type": "video/mp4", "Content-Length": videoBuffer.length },
+        timeout: 15 * 60 * 1000,
+      }, (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
+        });
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(new Error("API request timed out (15 min)")); });
+      req.write(videoBuffer);
+      req.end();
     });
+    console.log(`[PROCESS] API responded: ${statusCode}, body=${(resBody.length / 1024 / 1024).toFixed(1)}MB`);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`API error ${res.status}: ${err}`);
+    if (statusCode < 200 || statusCode >= 300) {
+      throw new Error(`API error ${statusCode}: ${resBody.toString().slice(0, 500)}`);
     }
 
-    const arrayBuffer = await res.arrayBuffer();
-    fs.writeFileSync(tmpOut, Buffer.from(arrayBuffer));
+    fs.writeFileSync(tmpOut, resBody);
 
-    const summary = res.headers.get("x-ai-summary") || "";
-    const segCount = res.headers.get("x-segments-count") || "?";
-    const width = parseInt(res.headers.get("x-video-width")) || 0;
-    const height = parseInt(res.headers.get("x-video-height")) || 0;
-    const duration = parseInt(res.headers.get("x-video-duration")) || 0;
+    const summary = resHeaders["x-ai-summary"] || "";
+    const segCount = resHeaders["x-segments-count"] || "?";
+    const width = parseInt(resHeaders["x-video-width"]) || 0;
+    const height = parseInt(resHeaders["x-video-height"]) || 0;
+    const duration = parseInt(resHeaders["x-video-duration"]) || 0;
 
     // Compress if needed
     let outputPath = tmpOut;
