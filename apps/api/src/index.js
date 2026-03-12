@@ -421,12 +421,26 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     segFiles.push(segPath);
   }
 
-  // Probe whether the first segment has audio
+  // Probe actual durations and whether the first segment has audio.
+  // VFR phone videos can produce extracted segments whose duration differs
+  // slightly from (src_out - src_in), causing wrong xfade offsets.
   let hasAudio = false;
-  try {
-    const audioProbe = await ffprobe(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", toWslPath(segFiles[0])]);
-    hasAudio = audioProbe.trim().length > 0;
-  } catch { hasAudio = false; }
+  const segDurations = [];
+  for (let i = 0; i < segFiles.length; i++) {
+    try {
+      const durStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", toWslPath(segFiles[i])]);
+      segDurations.push(parseFloat(durStr.trim()) || (segments[i].src_out - segments[i].src_in));
+    } catch {
+      segDurations.push(segments[i].src_out - segments[i].src_in);
+    }
+    if (i === 0) {
+      try {
+        const audioProbe = await ffprobe(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", toWslPath(segFiles[0])]);
+        hasAudio = audioProbe.trim().length > 0;
+      } catch { hasAudio = false; }
+    }
+  }
+  console.log(`[RENDER] Actual segment durations: ${segDurations.map(d => d.toFixed(3)).join(", ")}s`);
 
   // Build input args as array for execFile
   const inputArgs = segFiles.flatMap(f => ["-i", toWslPath(f)]);
@@ -442,16 +456,29 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
   };
 
-  // Calculate actual segment durations from extracted files (more reliable)
-  const segDurations = segments.map(s => s.src_out - s.src_in);
+  // Normalize each input stream to ensure consistent pixel format and SAR
+  // before passing to xfade. Mismatched SAR or pixel format (common with
+  // phone/VFR videos) causes severe corruption artifacts in the xfade filter.
+  const normParts = [];
+  const normVideoLabels = [];
+  const normAudioLabels = [];
+  for (let i = 0; i < segFiles.length; i++) {
+    const normVLabel = `[nv${i}]`;
+    normParts.push(`[${i}:v]format=yuv420p,setsar=1${normVLabel}`);
+    normVideoLabels.push(normVLabel);
+    if (hasAudio) {
+      const normALabel = `[na${i}]`;
+      normParts.push(`[${i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo${normALabel}`);
+      normAudioLabels.push(normALabel);
+    }
+  }
 
   // Build the filter chain using concat for hard cuts and xfade for soft
-  // transitions. Previous approach used xfade with 0.001s for hard cuts,
-  // which caused severe visual corruption/artifacts at segment boundaries.
+  // transitions.
   let filterParts = [];
   let audioParts = [];
-  let lastVideoLabel = "[0:v]";
-  let lastAudioLabel = "[0:a]";
+  let lastVideoLabel = normVideoLabels[0];
+  let lastAudioLabel = hasAudio ? normAudioLabels[0] : null;
   let cumulativeOffset = segDurations[0];
 
   for (let i = 0; i < segments.length - 1; i++) {
@@ -460,11 +487,14 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     const outLabel = `[v${i + 1}]`;
     const aOutLabel = `[a${i + 1}]`;
 
+    const nextVLabel = normVideoLabels[i + 1];
+    const nextALabel = hasAudio ? normAudioLabels[i + 1] : null;
+
     if (tType === "hard_cut") {
       // Use concat filter for clean hard cuts — no overlap, no artifacts
-      filterParts.push(`${lastVideoLabel}[${i + 1}:v]concat=n=2:v=1:a=0${outLabel}`);
+      filterParts.push(`${lastVideoLabel}${nextVLabel}concat=n=2:v=1:a=0${outLabel}`);
       if (hasAudio) {
-        audioParts.push(`${lastAudioLabel}[${i + 1}:a]concat=n=2:v=0:a=1${aOutLabel}`);
+        audioParts.push(`${lastAudioLabel}${nextALabel}concat=n=2:v=0:a=1${aOutLabel}`);
         lastAudioLabel = aOutLabel;
       }
       cumulativeOffset += segDurations[i + 1]; // No overlap for hard cuts
@@ -472,9 +502,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
       // Use xfade for soft transitions (dissolve, fade, etc.)
       const fadeDur = FADE_DURATION;
       const offset = Math.max(0, cumulativeOffset - fadeDur);
-      filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
+      filterParts.push(`${lastVideoLabel}${nextVLabel}xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
       if (hasAudio) {
-        audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${fadeDur}${aOutLabel}`);
+        audioParts.push(`${lastAudioLabel}${nextALabel}acrossfade=d=${fadeDur}${aOutLabel}`);
         lastAudioLabel = aOutLabel;
       }
       // xfade overlaps by fadeDur, so net position = offset + next segment duration
@@ -485,7 +515,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
 
   try {
     if (filterParts.length > 0) {
-      const allFilters = hasAudio ? [...filterParts, ...audioParts] : filterParts;
+      const allFilters = hasAudio
+        ? [...normParts, ...filterParts, ...audioParts]
+        : [...normParts, ...filterParts];
       const filterComplex = allFilters.join(";");
       const audioArgs = hasAudio ? srcAudioArgs : ["-an"];
       console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
