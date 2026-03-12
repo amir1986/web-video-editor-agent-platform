@@ -1004,18 +1004,34 @@ app.post("/api/merge", authMiddleware, mergeUpload.array("videos", 20), async (r
     tmpOut = tmpFile("mp4");
     console.log(`[MERGE] Merging ${files.length} files...`);
 
-    await ffmpeg([
-      "-y", "-loglevel", "error",
-      "-f", "concat", "-safe", "0",
-      "-i", toWslPath(concatFile),
-      "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-      "-c:a", "aac", "-b:a", "192k",
-      "-movflags", "+faststart",
-      toWslPath(tmpOut),
-    ]);
+    // Try stream copy first (instant, no quality loss). Falls back to
+    // re-encode if files have incompatible codecs/resolution/fps.
+    let usedCopy = false;
+    try {
+      await ffmpeg([
+        "-y", "-loglevel", "error",
+        "-f", "concat", "-safe", "0",
+        "-i", toWslPath(concatFile),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        toWslPath(tmpOut),
+      ]);
+      usedCopy = true;
+    } catch {
+      console.log("[MERGE] Stream copy failed (incompatible streams), falling back to re-encode");
+      await ffmpeg([
+        "-y", "-loglevel", "error",
+        "-f", "concat", "-safe", "0",
+        "-i", toWslPath(concatFile),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        toWslPath(tmpOut),
+      ]);
+    }
 
     const outSize = fs.statSync(tmpOut).size;
-    console.log(`[MERGE] Done: ${(outSize / 1024 / 1024).toFixed(1)}MB from ${files.length} files`);
+    console.log(`[MERGE] Done: ${(outSize / 1024 / 1024).toFixed(1)}MB from ${files.length} files (${usedCopy ? "stream copy" : "re-encoded"})`);
 
     const name = req.query.name || "merged";
     res.set("Content-Type", "video/mp4");
