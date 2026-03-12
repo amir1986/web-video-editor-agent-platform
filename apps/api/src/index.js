@@ -456,15 +456,17 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
   };
 
-  // Normalize each input stream to ensure consistent pixel format and SAR
-  // before passing to xfade. Mismatched SAR or pixel format (common with
-  // phone/VFR videos) causes severe corruption artifacts in the xfade filter.
+  // Normalize each input stream to ensure consistent pixel format, SAR, and
+  // frame rate before passing to xfade/concat. VFR phone videos can have
+  // inconsistent frame timing between segments — without fps normalization the
+  // concat filter freezes on the last frame of a segment before the next begins.
+  const normFps = sourceQuality?.video?.fps > 0 ? sourceQuality.video.fps : 30;
   const normParts = [];
   const normVideoLabels = [];
   const normAudioLabels = [];
   for (let i = 0; i < segFiles.length; i++) {
     const normVLabel = `[nv${i}]`;
-    normParts.push(`[${i}:v]format=yuv420p,setsar=1${normVLabel}`);
+    normParts.push(`[${i}:v]format=yuv420p,setsar=1,fps=fps=${normFps}${normVLabel}`);
     normVideoLabels.push(normVLabel);
     if (hasAudio) {
       const normALabel = `[na${i}]`;
