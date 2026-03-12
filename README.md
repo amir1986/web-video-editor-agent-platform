@@ -15,10 +15,10 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173) for the Web UI, API runs on [http://localhost:3001](http://localhost:3001).
 
-**Requirements:** Node.js >= 18, ffmpeg.
+**Requirements:** Node.js >= 18, ffmpeg, Ollama with Qwen 2.5 VL model.
 
-> No `ANTHROPIC_API_KEY` needed for the web UI — AI runs via Puter.js in the browser.
-> The backend API (ffmpeg trim/render/merge) still requires the Node server. Ollama or `ANTHROPIC_API_KEY` are only needed if you use the REST API or bot channels directly.
+> The web UI uses Puter.js in the browser — no local LLM needed.
+> The backend API requires Ollama running locally for AI features.
 
 ## Web UI
 
@@ -39,7 +39,7 @@ Sessions auto-save to IndexedDB and restore after refresh.
 The web UI uses **Puter.js v2** — a browser-native SDK that routes AI calls through Puter's infrastructure. No API keys are stored in the app or on the server.
 
 ```
-Browser → puter.ai.chat() → Puter infrastructure → Claude / other models
+Browser → puter.ai.chat() → Puter infrastructure → AI models
 ```
 
 **Auth flow:**
@@ -48,8 +48,7 @@ Browser → puter.ai.chat() → Puter infrastructure → Claude / other models
 
 **Model selection:**
 - On page load, `puter.ai.listModels()` fetches all available models dynamically — no hardcoded model names.
-- Defaults to the newest Claude Sonnet available, falling back to `claude-3-5-sonnet` → first model.
-- Prefers `-latest` aliases when available (e.g. `claude-sonnet-latest`).
+- Prefers `-latest` aliases when available.
 
 **Agent pipeline (runs fully in-browser):**
 
@@ -75,9 +74,10 @@ Only needed for the backend API (ffmpeg operations) and bot channels:
 ```bash
 # apps/api/.env
 
-# LLM for REST API / bots (optional — web UI uses Puter.js instead)
-ANTHROPIC_API_KEY=sk-ant-...     # Claude API (optional)
-VISION_MODEL=qwen2.5vl:7b       # Ollama (default fallback)
+# LLM for REST API / bots (Ollama with Qwen)
+OLLAMA_URL=http://localhost:11434/v1/chat/completions
+VISION_MODEL=qwen2.5vl:7b
+TEXT_MODEL=qwen2.5vl:7b
 
 # Auth (optional)
 AUTH_SECRET=your-secret
@@ -93,7 +93,7 @@ These endpoints power the ffmpeg operations (trim, render, merge, overlay). The 
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/auto-edit` | Full AI auto-edit — video in, video out (uses backend LLM) |
+| `POST` | `/api/auto-edit` | Full AI auto-edit — video in, video out (uses Ollama) |
 | `POST` | `/api/render` | Render an EditPlan |
 | `POST` | `/api/trim` | Trim video (`?in=5&out=15`) |
 | `POST` | `/api/overlay` | Burn text overlays |
@@ -103,7 +103,7 @@ These endpoints power the ffmpeg operations (trim, render, merge, overlay). The 
 > `/api/analyze` is no longer used by the web UI — AI analysis runs in the browser via Puter.js.
 
 ```bash
-# Full auto-edit via REST (uses backend LLM, requires ANTHROPIC_API_KEY or Ollama)
+# Full auto-edit via REST (uses Ollama)
 curl -X POST http://localhost:3001/api/auto-edit \
   --data-binary @input.mp4 -H "Content-Type: video/mp4" -o highlights.mp4
 
@@ -118,7 +118,7 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 |---|---|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
 | AI (browser) | Puter.js v2 — user-pays, no API keys, guest sessions free |
-| AI (server) | Multi-agent pipeline (6 agents), Ollama / Claude API, RAG knowledge base |
+| AI (server) | Multi-agent pipeline (6 agents), Ollama (Qwen 2.5 VL), RAG knowledge base |
 | Backend | Express.js, ffmpeg/ffprobe |
 | Persistence | IndexedDB (client), filesystem (server) |
 
@@ -147,19 +147,6 @@ See `apps/api/src/channels/` for adapters and required env vars.
 
 ```bash
 node apps/api/src/mcp-server.js
-```
-
-Claude Desktop config:
-
-```json
-{
-  "mcpServers": {
-    "video-editor": {
-      "command": "node",
-      "args": ["apps/api/src/mcp-server.js"]
-    }
-  }
-}
 ```
 
 Tools: `probe_video`, `extract_frames`, `analyze_scene`, `search_knowledge`, `calculate_pacing`.

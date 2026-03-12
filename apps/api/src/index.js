@@ -599,7 +599,7 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
     const frames = await extractFrames(wslIn, duration, frameCount);
 
     // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
-    // Pass videoPath for Claude tool use (cookbook: agentic loop)
+    // Pass videoPath for tool context
     console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
     const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
 
@@ -696,7 +696,7 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
 /**
  * POST /api/auto-edit-stream — Same as /api/auto-edit but with SSE progress.
  *
- * Claude Cookbook pattern: Server-Sent Events for real-time agent progress.
+ * Server-Sent Events for real-time agent progress.
  * The client receives progress events as each agent completes, then the
  * final video binary at the end.
  *
@@ -979,9 +979,8 @@ if (fs.existsSync(webDist)) {
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 app.listen(PORT, () => {
-  const provider = process.env.ANTHROPIC_API_KEY ? "Claude API (auto-detected)" : "Ollama (local)";
   console.log(`VideoAgent API on http://localhost:${PORT}`);
-  console.log(`  LLM Provider: ${provider}`);
+  console.log(`  LLM Provider: Ollama (local)`);
   console.log(`  Auth: ${AUTH_ENABLED ? "ENABLED (set AUTH_SECRET)" : "DISABLED (open access)"}`);
   console.log("  POST /api/auth/login       - Get auth token");
   console.log("  GET  /api/auth/verify      - Verify token");

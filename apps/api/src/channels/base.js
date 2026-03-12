@@ -120,7 +120,7 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
 
     const videoBuffer = fs.readFileSync(inputPath);
     // Use undici directly so we can set headersTimeout + bodyTimeout beyond
-    // undici's 30s default. The API calls Claude which can take several minutes
+    // undici's 30s default. The API calls the LLM which can take several minutes
     // on large files, so we need 10–15 min timeouts here.
     const agent = new Agent({ headersTimeout: 10 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 });
     const res = await undiciFetch(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`, {

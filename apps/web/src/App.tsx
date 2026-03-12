@@ -187,13 +187,12 @@ export default function App() {
         });
         setModelsList(items);
 
-        // Default selection: newest Sonnet from claude/anthropic → claude-3-5-sonnet fallback → first
-        const claudeModels = models.filter(
-          (m: any) => (m.provider || "").toLowerCase().includes("claude") || (m.provider || "").toLowerCase().includes("anthropic")
+        // Default selection: prefer Qwen models → first available model
+        const qwenModels = models.filter(
+          (m: any) => (m.name || m.id || "").toLowerCase().includes("qwen")
         );
-        const sonnetModels = claudeModels.filter((m: any) => (m.name || m.id || "").toLowerCase().includes("sonnet"));
-        sonnetModels.sort((a: any, b: any) => (b.name || b.id || "").localeCompare(a.name || a.id || ""));
-        const pick = sonnetModels[0] || models.find((m: any) => (m.id || "").includes("claude-3-5-sonnet")) || models[0];
+        qwenModels.sort((a: any, b: any) => (b.name || b.id || "").localeCompare(a.name || a.id || ""));
+        const pick = qwenModels[0] || models[0];
         if (pick) {
           const latestAlias = (pick.aliases || []).find((a: string) => a.endsWith("-latest"));
           setSelectedModel(latestAlias || pick.id);
@@ -202,8 +201,8 @@ export default function App() {
         console.error("[Puter] init failed:", e);
         // Sane fallback so the UI is usable even if Puter init errors
         setPuterUser({ isGuest: true });
-        setModelsList([{ id: "claude-3-5-sonnet", label: "Claude 3.5 Sonnet (fallback)" }]);
-        setSelectedModel("claude-3-5-sonnet");
+        setModelsList([{ id: "qwen2.5", label: "Qwen 2.5 (fallback)" }]);
+        setSelectedModel("qwen2.5");
       }
     })();
   }, []);
@@ -354,7 +353,7 @@ export default function App() {
       const stream = await puter.ai.chat(messages, { model: selectedModel, stream: true });
       let text = "";
       for await (const part of stream) {
-        // Puter Claude chunks expose `.text`; guard against other shapes
+        // Puter streaming chunks expose `.text`; guard against other shapes
         if (typeof part?.text === "string") text += part.text;
         else if (typeof part === "string") text += part;
       }

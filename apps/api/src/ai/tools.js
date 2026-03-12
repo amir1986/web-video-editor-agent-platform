@@ -1,9 +1,9 @@
 /**
  * Video Editing Tools Registry
  *
- * Claude Cookbook pattern: Tool Use / Function Calling
- * Each tool has a Claude-format definition and a handler function.
- * Tools can be used by agents via the agentic loop in llm-client.js.
+ * Tool Use / Function Calling
+ * Each tool has a definition and a handler function.
+ * Tools can be used by agents via the MCP server.
  *
  * Tools exposed:
  * - probe_video: Get video metadata (duration, resolution, fps, codec, bitrate)
@@ -54,7 +54,7 @@ function ffmpegExec(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Definitions (Claude API format from cookbook)
+// Tool Definitions
 // ---------------------------------------------------------------------------
 
 const TOOL_DEFINITIONS = [

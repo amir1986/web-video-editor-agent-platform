@@ -272,11 +272,7 @@ await testAsync("MCP unknown method returns error", async () => {
 
 console.log("\n--- LLM Client ---");
 
-const { withRetry, LLM_PROVIDER } = require("./ai/llm-client");
-
-test("LLM provider is detected", () => {
-  assert(["claude", "ollama"].includes(LLM_PROVIDER), `Unexpected provider: ${LLM_PROVIDER}`);
-});
+const { withRetry } = require("./ai/llm-client");
 
 await testAsync("withRetry succeeds on first try", async () => {
   let attempts = 0;
