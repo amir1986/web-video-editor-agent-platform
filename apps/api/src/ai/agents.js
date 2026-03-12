@@ -11,17 +11,13 @@
  * Agents ONLY handle: cuts, structure, continuity, transitions, constraint validation, quality auditing.
  * They do NOT do: color grading, audio mixing, music, captions, VFX, thumbnails.
  *
- * Claude Cookbook patterns applied:
- * - Unified LLM client (Ollama + Claude API) with retry/backoff
- * - Tool use / function calling for Claude API agents
+ * Patterns applied:
+ * - Ollama LLM client (Qwen 2.5 VL) with retry/backoff
  * - RAG knowledge base injection for editing decisions
- * - Prompt caching for repeated system prompts
- * - Agentic loop for tool-calling agents
  * - SSE progress events for real-time pipeline updates
  */
 
-const { llmRequest, claudeAgentLoop, ANTHROPIC_API_KEY } = require("./llm-client");
-const { TOOL_DEFINITIONS, TOOL_HANDLERS, setToolContext } = require("./tools");
+const { llmRequest } = require("./llm-client");
 const { getEditingContext } = require("./knowledge-base");
 
 // ---------------------------------------------------------------------------
@@ -49,7 +45,7 @@ function emitProgress(agent, message, data = {}) {
 
 // ---------------------------------------------------------------------------
 // 1. Cut Agent — selects the best parts and determines cut points
-//    Cookbook: Tool use + RAG knowledge injection + Vision
+//    RAG knowledge injection + Vision
 // ---------------------------------------------------------------------------
 
 async function runCutAgent(videoMeta, frames, options = {}) {
@@ -79,35 +75,7 @@ Return ONLY valid JSON:
 
 Analyze the video and decide which parts to keep for the highlight reel.`;
 
-  // Claude API with tool use: auto-detected when API key is set
-  if (ANTHROPIC_API_KEY && options.videoPath) {
-    try {
-      setToolContext({ videoPath: options.videoPath });
-      // Select only tools useful for the cut agent
-      const cutTools = TOOL_DEFINITIONS.filter(t =>
-        ["analyze_scene", "search_knowledge", "calculate_pacing"].includes(t.name)
-      );
-      const response = await claudeAgentLoop(
-        systemPrompt,
-        frames.length > 0
-          ? [{ type: "text", text: userText }, ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))]
-          : userText,
-        cutTools,
-        TOOL_HANDLERS,
-        { maxTurns: 3 }
-      );
-      // Extract JSON from response
-      const match = response.text.match(/\{[\s\S]*\}/);
-      if (match) {
-        const result = JSON.parse(match[0]);
-        if (result.segments?.length) return result;
-      }
-    } catch (err) {
-      emitProgress("CUT", `Claude tool-use failed (${err.message}), falling back to standard LLM`);
-    }
-  }
-
-  // Standard LLM path (Ollama or Claude without tools)
+  // LLM path (Ollama / Qwen)
   const userContent = frames.length > 0
     ? [{ type: "text", text: userText }, ...frames.map(f => ({ type: "image_url", image_url: { url: f.base64 } }))]
     : userText;
@@ -527,9 +495,8 @@ function buildFallbackCutResult(duration) {
 /**
  * Run the multi-agent editing pipeline.
  *
- * Cookbook patterns:
+ * Patterns:
  * - SSE progress events via setProgressCallback()
- * - Tool use for Cut Agent (when Claude API available)
  * - RAG knowledge injection for all LLM agents
  * - Retry with exponential backoff (via llm-client)
  *
