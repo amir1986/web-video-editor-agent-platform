@@ -1,10 +1,10 @@
 /**
  * Video Editing Knowledge Base (RAG)
  *
- * Claude Cookbook pattern: Retrieval Augmented Generation
+ * Retrieval Augmented Generation
  * Instead of a vector DB, uses a curated embedded knowledge base with
  * keyword-based retrieval. This keeps the system self-contained and
- * works offline with both Ollama and Claude API.
+ * works offline with Ollama.
  *
  * The knowledge base contains professional video editing best practices,
  * transition guidelines, pacing rules, and narrative structure patterns.

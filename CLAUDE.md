@@ -11,6 +11,8 @@
 | `npm run test`             | Run API tests                                    |
 | `npm run check-deps`       | Check for deprecated/vulnerable dependencies     |
 | `npm run check-deps:full`  | Full check including npm audit                   |
+| `npm run test:e2e`         | Run Playwright E2E tests (headless)              |
+| `npm run test:e2e:headed`  | Run Playwright E2E tests (headed, see browser)   |
 
 ## Session Management
 
@@ -66,6 +68,32 @@
 - Use plain `node scripts/foo.js` for any logic that needs error suppression or conditional execution.
 - Use `{ stdio: ['inherit', 'pipe', 'pipe'] }` in `child_process.execSync` calls instead of appending `2>/dev/null` to the command string.
 
+## E2E Testing (Playwright)
+
+- **Location:** `e2e/` directory with `playwright.config.ts`
+- **Test fixtures:** Generated via ffmpeg in `e2e/global-setup.ts` (3 test videos + 1 non-video file)
+- **Fixtures are gitignored** — regenerated automatically on first run
+- **Ollama mocking:** Tests auto-detect if Ollama is running; fall back to mocks if not. Force mocks with `MOCK_OLLAMA=1`
+- **Browser:** Chromium only. Install with `npx playwright install chromium`
+- **Test files:** `e2e/tests/*.spec.ts` — import, playback, AI analysis, export, merge, overlays, audio, session persistence, Ollama status
+
+### Running E2E tests
+
+```bash
+# Headless (CI)
+npm run test:e2e
+
+# Headed (see browser)
+npm run test:e2e:headed
+
+# Force mocked Ollama
+MOCK_OLLAMA=1 npm run test:e2e
+```
+
+### E2E tests MUST run on every commit
+
+E2E tests are part of the standard verification flow. Run them alongside unit tests before pushing.
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:
@@ -73,4 +101,5 @@ Before pushing or opening a PR, run these in order:
 1. `npm run typecheck`
 2. `npm run lint`
 3. `npm run test`
-4. `npm run check-deps`
+4. `npm run test:e2e`
+5. `npm run check-deps`

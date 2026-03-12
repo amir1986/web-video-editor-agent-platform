@@ -1,17 +1,15 @@
 /**
  * MCP (Model Context Protocol) Server for Video Editing Tools
  *
- * Claude Cookbook pattern: MCP Server
  * Exposes video editing tools via the Model Context Protocol so that
- * any MCP-compatible AI client (Claude Desktop, Claude Code, etc.)
- * can use them directly.
+ * any MCP-compatible AI client can use them directly.
  *
  * Protocol: JSON-RPC 2.0 over stdio
  *
  * Usage:
  *   node apps/api/src/mcp-server.js
  *
- * Or in Claude Desktop config:
+ * Or in an MCP client config:
  *   {
  *     "mcpServers": {
  *       "video-editor": {

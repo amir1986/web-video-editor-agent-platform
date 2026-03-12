@@ -120,7 +120,7 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
 
     const videoBuffer = fs.readFileSync(inputPath);
     // Use Node's built-in http.request with generous timeouts.
-    // The API calls Claude which can take several minutes on large files.
+    // The API calls the LLM which can take several minutes on large files.
     console.log(`[PROCESS] Sending to API: ${API_URL}/api/auto-edit`);
     const { statusCode, headers: resHeaders, body: resBody } = await new Promise((resolve, reject) => {
       const url = new URL(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`);

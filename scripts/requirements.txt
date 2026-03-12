@@ -1,0 +1,6 @@
+# Video Autopilot — Python dependencies
+# Install: pip install -r scripts/requirements.txt
+
+faster-whisper>=1.0.0
+opencv-python>=4.8.0
+torch>=2.0.0
