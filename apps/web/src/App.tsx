@@ -30,8 +30,15 @@ import {
 } from "lucide-react";
 preloadFFmpeg().catch(console.error);
 
-// Puter.js is loaded via <script> in index.html — declare global so TS is happy
-declare const puter: any;
+const OLLAMA_BASE = "http://localhost:11434";
+
+const VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"];
+
+function isVideoFile(file: File): boolean {
+  if (file.type.startsWith("video/")) return true;
+  const ext = file.name.toLowerCase().replace(/^.*(\.[^.]+)$/, "$1");
+  return VIDEO_EXTENSIONS.includes(ext);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,7 +87,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("ai");
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [modelsList, setModelsList] = useState<{ id: string; label: string }[]>([]);
-  const [puterUser, setPuterUser] = useState<{ isGuest: boolean; username?: string } | null>(null);
+  const [ollamaConnected, setOllamaConnected] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     (localStorage.getItem("theme") as "dark" | "light") || "dark"
   );
@@ -162,47 +169,26 @@ export default function App() {
     }).catch(console.error);
   }, []);
 
-  // Load available AI models from Puter.js and resolve current auth state.
-  // Puter auto-creates a free temporary guest account on first use — no sign-in
-  // required. Users can optionally sign in later for a persistent account.
+  // Load available AI models from local Ollama
   useEffect(() => {
     (async () => {
       try {
-        // Resolve current Puter auth state (may be guest or signed-in user)
-        const signedIn: boolean = await puter.auth.isLoggedIn().catch(() => false);
-        if (signedIn) {
-          const user = await puter.auth.getUser().catch(() => null);
-          setPuterUser({ isGuest: false, username: user?.username });
-        } else {
-          // Not signed in — Puter will silently create a guest session on the
-          // first puter.ai.chat() call. Mark as guest so the UI can offer sign-in.
-          setPuterUser({ isGuest: true });
-        }
-
-        const models: any[] = await puter.ai.listModels();
-        const items = models.map((m: any) => {
-          // Prefer an alias ending with "-latest", else fall back to model id
-          const latestAlias = (m.aliases || []).find((a: string) => a.endsWith("-latest"));
-          return { id: latestAlias || m.id, label: m.name || m.id };
-        });
-        setModelsList(items);
-
-        // Default selection: prefer Qwen models → first available model
-        const qwenModels = models.filter(
-          (m: any) => (m.name || m.id || "").toLowerCase().includes("qwen")
-        );
-        qwenModels.sort((a: any, b: any) => (b.name || b.id || "").localeCompare(a.name || a.id || ""));
-        const pick = qwenModels[0] || models[0];
-        if (pick) {
-          const latestAlias = (pick.aliases || []).find((a: string) => a.endsWith("-latest"));
-          setSelectedModel(latestAlias || pick.id);
-        }
+        const resp = await fetch(`${OLLAMA_BASE}/api/tags`);
+        if (!resp.ok) throw new Error(`Ollama unreachable: ${resp.status}`);
+        const data = await resp.json();
+        const models = (data.models || []).map((m: any) => ({
+          id: m.name as string,
+          label: m.name as string,
+        }));
+        setModelsList(models);
+        setOllamaConnected(true);
+        const qwen = models.find((m: { id: string }) => m.id.includes("qwen"));
+        setSelectedModel(qwen?.id || models[0]?.id || "qwen2.5vl:7b");
       } catch (e) {
-        console.error("[Puter] init failed:", e);
-        // Sane fallback so the UI is usable even if Puter init errors
-        setPuterUser({ isGuest: true });
-        setModelsList([{ id: "qwen2.5", label: "Qwen 2.5 (fallback)" }]);
-        setSelectedModel("qwen2.5");
+        console.error("[Ollama] init failed:", e);
+        setOllamaConnected(false);
+        setModelsList([{ id: "qwen2.5vl:7b", label: "qwen2.5vl:7b" }]);
+        setSelectedModel("qwen2.5vl:7b");
       }
     })();
   }, []);
@@ -231,7 +217,10 @@ export default function App() {
   }, []);
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const allFiles = Array.from(e.target.files || []);
+    const rejected = allFiles.filter(f => !isVideoFile(f));
+    const files = allFiles.filter(f => isVideoFile(f));
+    if (rejected.length > 0) setToast(`Skipped ${rejected.length} non-video file(s)`);
     if (files.length === 0) return;
     const newClips: Clip[] = files.map(file => {
       const clipId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
@@ -247,7 +236,10 @@ export default function App() {
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDraggingOver(false); };
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDraggingOver(false);
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("video/"));
+    const allFiles = Array.from(e.dataTransfer.files);
+    const rejected = allFiles.filter(f => !isVideoFile(f));
+    const files = allFiles.filter(f => isVideoFile(f));
+    if (rejected.length > 0) setToast(`Skipped ${rejected.length} non-video file(s)`);
     if (files.length === 0) return;
     const newClips: Clip[] = files.map(file => {
       const clipId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
@@ -342,22 +334,16 @@ export default function App() {
       return next;
     });
 
-    // ── Guest-first: Puter auto-creates a free temporary guest account ────────
-    // puter.ai.chat() works without any explicit sign-in. On the very first call
-    // Puter silently provisions a guest session — no popup, no API key needed.
-    // If the user has signed in (via the button in the AI panel) they get their
-    // persistent quota instead. Either way we just call puter.ai.chat() directly.
-
-    // ── Helper: stream one Puter AI turn and return the full text ────────────
-    const puterChat = async (messages: { role: string; content: any }[]): Promise<string> => {
-      const stream = await puter.ai.chat(messages, { model: selectedModel, stream: true });
-      let text = "";
-      for await (const part of stream) {
-        // Puter streaming chunks expose `.text`; guard against other shapes
-        if (typeof part?.text === "string") text += part.text;
-        else if (typeof part === "string") text += part;
-      }
-      return text;
+    // ── Helper: send messages to local Ollama and return the full text ──────
+    const ollamaChat = async (messages: { role: string; content: any }[]): Promise<string> => {
+      const resp = await fetch(`${OLLAMA_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: selectedModel, messages, stream: false }),
+      });
+      if (!resp.ok) throw new Error(`Ollama error: ${resp.status}`);
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content || "";
     };
 
     const extractJSON = (text: string): any => {
@@ -392,7 +378,7 @@ export default function App() {
       const height = videoRef.current.videoHeight || 0;
       const fps = 30;
 
-      // ── 1. CUT AGENT (LLM + vision via Puter.js) ─────────────────────────
+      // ── 1. CUT AGENT (LLM + vision via Ollama) ────────────────────────────
       const markStep = (step: string) => {
         if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
         setAgentCurrentStep(step);
@@ -413,7 +399,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":0,"src_out":8},...],"cu
 
 VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
         const frameContent = frames.map(f => ({ type: "image_url", image_url: { url: f } }));
-        const cutResp = await puterChat([{ role: "user", content: [{ type: "text", text: cutPrompt }, ...frameContent] }]);
+        const cutResp = await ollamaChat([{ role: "user", content: [{ type: "text", text: cutPrompt }, ...frameContent] }]);
         const cutResult = extractJSON(cutResp);
         const valid = (cutResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
         const totalKept = valid.reduce((sum: number, s: any) => sum + (s.src_out - s.src_in), 0);
@@ -431,7 +417,7 @@ VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
         const structPrompt = `You are the STRUCTURE AGENT. Reorder/adjust these segments for the best narrative arc (hook→buildup→climax→resolution). Total kept duration must stay between 30-75% of ${duration.toFixed(1)}s.
 Input: ${JSON.stringify(cutSegments)}
 Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>},...],"structure_notes":"..."}`;
-        const structResp = await puterChat([{ role: "user", content: structPrompt }]);
+        const structResp = await ollamaChat([{ role: "user", content: structPrompt }]);
         const structResult = extractJSON(structResp);
         const valid = (structResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
         if (valid.length) structSegments = valid;
@@ -447,7 +433,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>},
         const contPrompt = `You are the CONTINUITY AGENT. Review adjacent segment pairs for jarring transitions. Adjust boundaries by ±0.5s to improve flow. Flag segments needing soft transitions.
 Input: ${JSON.stringify(structSegments)}
 Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"needs_soft_transition":false},...],"continuity_notes":"..."}`;
-        const contResp = await puterChat([{ role: "user", content: contPrompt }]);
+        const contResp = await ollamaChat([{ role: "user", content: contPrompt }]);
         const contResult = extractJSON(contResp);
         const valid = (contResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
         if (valid.length) contSegments = valid;
@@ -508,8 +494,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       let newInOut = state.inOut;
       if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
       save({ ...state, inOut: newInOut, editPlan });
-      const accountLabel = puterUser?.isGuest ? "guest" : (puterUser?.username || "puter");
-      saveAgentSummary(`${segs.length} highlights selected via Puter.js [${accountLabel} · ${selectedModel}]`);
+      saveAgentSummary(`${segs.length} highlights selected via Ollama [${selectedModel}]`);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -906,44 +891,15 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                 </div>
               )}
 
-              {/* Puter auth status — guest runs free, sign-in for persistent quota */}
-              {puterUser && (
-                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md border border-border bg-secondary/40 text-[10px]">
-                  <span className="text-muted-foreground">
-                    {puterUser.isGuest
-                      ? "Running as guest (free)"
-                      : `Puter: ${puterUser.username}`}
-                  </span>
-                  {puterUser.isGuest ? (
-                    <button
-                      className="text-primary font-semibold hover:underline"
-                      onClick={async () => {
-                        try {
-                          await puter.auth.signIn();
-                          const user = await puter.auth.getUser().catch(() => null);
-                          setPuterUser({ isGuest: false, username: user?.username });
-                        } catch { /* sign-in cancelled or failed — stay as guest */ }
-                      }}
-                    >
-                      Sign in
-                    </button>
-                  ) : (
-                    <button
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={async () => {
-                        try {
-                          await puter.auth.signOut();
-                          setPuterUser({ isGuest: true });
-                        } catch { /* sign-out failed — ignore */ }
-                      }}
-                    >
-                      Sign out
-                    </button>
-                  )}
-                </div>
-              )}
+              {/* Ollama connection status */}
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md border border-border bg-secondary/40 text-[10px]">
+                <span className={cn("w-1.5 h-1.5 rounded-full", ollamaConnected ? "bg-success" : "bg-destructive")} />
+                <span className="text-muted-foreground">
+                  {ollamaConnected ? "Ollama (local)" : "Ollama not connected"}
+                </span>
+              </div>
 
-              {/* Model selector — populated dynamically via puter.ai.listModels() */}
+              {/* Model selector — populated dynamically from Ollama */}
               <div className="flex flex-col gap-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-0.5">
                   Model

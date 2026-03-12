@@ -62,6 +62,45 @@ function tmpFile(ext) {
 function cleanup(...files) {
   for (const f of files) try { fs.unlinkSync(f); } catch {}
 }
+
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"]);
+function isVideoFile(filename) {
+  if (!filename) return false;
+  const ext = path.extname(filename).toLowerCase();
+  return VIDEO_EXTENSIONS.has(ext);
+}
+
+// ---------------------------------------------------------------------------
+// In-memory FIFO queue for auto-edit (VRAM can only handle one at a time)
+// ---------------------------------------------------------------------------
+const autoEditQueue = [];
+let autoEditRunning = false;
+
+function enqueueAutoEdit(handler) {
+  return new Promise((resolve, reject) => {
+    autoEditQueue.push({ handler, resolve, reject });
+    processAutoEditQueue();
+  });
+}
+
+async function processAutoEditQueue() {
+  if (autoEditRunning || autoEditQueue.length === 0) return;
+  autoEditRunning = true;
+  const { handler, resolve, reject } = autoEditQueue.shift();
+  try {
+    const result = await handler();
+    resolve(result);
+  } catch (err) {
+    reject(err);
+  } finally {
+    autoEditRunning = false;
+    processAutoEditQueue();
+  }
+}
+
+function getQueuePosition() {
+  return { queued: autoEditQueue.length, processing: autoEditRunning };
+}
 function ffmpeg(args) {
   return new Promise((resolve, reject) => {
     const [cmd, fullArgs] = process.platform === "win32"
@@ -566,70 +605,89 @@ app.post("/api/trim", authMiddleware, express.raw({ type: "*/*", limit: "2gb" })
   }
 });
 
+// GET /api/auto-edit/status — check queue position
+app.get("/api/auto-edit/status", authMiddleware, (req, res) => {
+  res.json(getQueuePosition());
+});
+
 //  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
+//  Requests are queued and processed sequentially (VRAM constraint).
 app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name   = req.query.name || "video";
-  const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
-  const tmpDir = path.join(os.tmpdir(), `edit_${crypto.randomBytes(4).toString("hex")}`);
-  fs.mkdirSync(tmpDir);
+  const queuePos = getQueuePosition();
+  if (queuePos.queued > 0) {
+    console.log(`[AUTO-EDIT] Request queued (position ${queuePos.queued + 1})`);
+  }
+
   try {
-    fs.writeFileSync(tmpIn, req.body);
-    const inputSize = fs.statSync(tmpIn).size;
-    console.log(`[AUTO-EDIT] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
-    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    await enqueueAutoEdit(async () => {
+      const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
+      const tmpDir = path.join(os.tmpdir(), `edit_${crypto.randomBytes(4).toString("hex")}`);
+      fs.mkdirSync(tmpDir);
+      try {
+        fs.writeFileSync(tmpIn, req.body);
+        const inputSize = fs.statSync(tmpIn).size;
+        console.log(`[AUTO-EDIT] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
+        const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
-    // Probe video metadata
-    const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
-    const duration = parseFloat(durationStr);
-    if (isNaN(duration) || duration <= 0) {
-      cleanup(tmpIn, tmpOut);
-      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-      return res.status(400).json({ error: "Could not determine video duration" });
-    }
-    // Probe FULL source quality params BEFORE any processing
-    const sourceQuality = await probeSourceQuality(wslIn);
+        // Probe video metadata
+        const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
+        const duration = parseFloat(durationStr);
+        if (isNaN(duration) || duration <= 0) {
+          cleanup(tmpIn, tmpOut);
+          try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+          res.status(400).json({ error: "Could not determine video duration" });
+          return;
+        }
+        // Probe FULL source quality params BEFORE any processing
+        const sourceQuality = await probeSourceQuality(wslIn);
 
-    const videoMeta = await probeVideoMeta(wslIn, duration);
-    console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
+        const videoMeta = await probeVideoMeta(wslIn, duration);
+        console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
 
-    // Extract frames for vision analysis
-    const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
-    console.log(`[AUTO-EDIT] Extracting ${frameCount} frames...`);
-    const frames = await extractFrames(wslIn, duration, frameCount);
+        // Extract frames for vision analysis
+        const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
+        console.log(`[AUTO-EDIT] Extracting ${frameCount} frames...`);
+        const frames = await extractFrames(wslIn, duration, frameCount);
 
-    // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
-    // Pass videoPath for tool context
-    console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
-    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
+        // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
+        console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
+        const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
 
-    const segments = editPlan.segments || [];
-    const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
-    console.log(`[AUTO-EDIT] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
+        const segments = editPlan.segments || [];
+        const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+        console.log(`[AUTO-EDIT] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
 
-    // Render the EditPlan to video using source-matched quality
-    console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
-    const renderStart = Date.now();
-    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
-    const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
-    const outputSize = fs.statSync(tmpOut).size;
-    console.log(`[AUTO-EDIT] Render done in ${renderElapsed}s`);
-    console.log(`[AUTO-EDIT] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB, ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
+        // Render the EditPlan to video using source-matched quality
+        console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
+        const renderStart = Date.now();
+        await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+        const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
+        const outputSize = fs.statSync(tmpOut).size;
+        console.log(`[AUTO-EDIT] Render done in ${renderElapsed}s`);
+        console.log(`[AUTO-EDIT] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB, ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
 
-    const summary = `${segments.length} highlights selected`;
-    res.set("Content-Type", "video/mp4");
-    res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
-    res.set("X-AI-Summary", summary);
-    res.set("X-Segments-Count", String(segments.length));
-    res.set("X-Video-Width", String(videoMeta.width));
-    res.set("X-Video-Height", String(videoMeta.height));
-    res.set("X-Video-Duration", String(Math.round(finalDuration)));
-    res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
+        const summary = `${segments.length} highlights selected`;
+        res.set("Content-Type", "video/mp4");
+        res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
+        res.set("X-AI-Summary", summary);
+        res.set("X-Segments-Count", String(segments.length));
+        res.set("X-Video-Width", String(videoMeta.width));
+        res.set("X-Video-Height", String(videoMeta.height));
+        res.set("X-Video-Duration", String(Math.round(finalDuration)));
+        res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
+      } catch (err) {
+        cleanup(tmpIn, tmpOut);
+        try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+        throw err;
+      }
+    });
   } catch (err) {
-    cleanup(tmpIn, tmpOut);
-    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-    console.error("[AUTO-EDIT ERROR]", err);
-    res.status(500).json({ error: "Auto-edit failed" });
+    if (!res.headersSent) {
+      console.error("[AUTO-EDIT ERROR]", err);
+      res.status(500).json({ error: "Auto-edit failed" });
+    }
   }
 });
 
@@ -927,6 +985,13 @@ app.post("/api/merge", authMiddleware, mergeUpload.array("videos", 20), async (r
   try {
     if (files.length < 2) {
       return res.status(400).json({ error: "Need at least 2 files to merge" });
+    }
+
+    // Validate all uploaded files are videos
+    const nonVideo = files.filter(f => !isVideoFile(f.originalname));
+    if (nonVideo.length > 0) {
+      files.forEach(f => { try { fs.unlinkSync(f.path); } catch {} });
+      return res.status(400).json({ error: `Not a video file: ${nonVideo.map(f => f.originalname).join(", ")}` });
     }
 
     // Build concat list
