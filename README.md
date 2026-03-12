@@ -80,15 +80,9 @@ python scripts/video_autopilot.py input.mp4 --plan-only > edit_plan.json
 
 # Resume after crash (uses checkpoint file)
 python scripts/video_autopilot.py input.mp4 --resume .input_autopilot_checkpoint.json
-
-# Scene-detection only (no Ollama needed)
-python scripts/video_autopilot.py input.mp4 --no-vision
-
-# Skip speech analysis
-python scripts/video_autopilot.py input.mp4 --no-audio
 ```
 
-**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (optional, falls back to CPU).
+**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen2.5vl:7b.
 
 ### How it works
 
@@ -102,11 +96,12 @@ Phase 4: ASSEMBLE → ffmpeg -c copy (lossless) or filter_complex
 
 **VRAM management ("4070 switch"):** Whisper loads on GPU for speech detection, then the model is deleted and `torch.cuda.empty_cache()` frees VRAM before vision analysis starts. This keeps peak VRAM under 8GB.
 
-**Consensus filtering:** A segment is approved only when:
-- Audio RMS intensity exceeds threshold (audible content)
-- Speech is detected (Whisper VAD)
-- Vision confidence > 0.7 (Qwen highlight classification)
-- 3-second buffer is added around each approved cut
+**Consensus filtering:** A segment is approved only when all three conditions are met:
+- Audio RMS intensity > threshold (audible content)
+- Whisper detects speech (`is_speech = True`)
+- Qwen-VL confidence score > 0.8
+
+A 3-second buffer is added to the start and end of every approved cut.
 
 **Dynamic sampling** adapts to video length:
 
@@ -117,7 +112,7 @@ Phase 4: ASSEMBLE → ffmpeg -c copy (lossless) or filter_complex
 | 10–60 min | 1 frame/10s |
 | > 1 hour | 1 frame/20s |
 
-**Resilience:** Checkpointing every 50 frames (resume with `--resume`), CUDA OOM falls back to CPU, Ollama down falls back to scene-detection-only mode.
+**Resilience:** Checkpointing every 50 frames (resume with `--resume`).
 
 **EditPlan compatibility:** The JSON output is compatible with the existing `/api/render` endpoint:
 

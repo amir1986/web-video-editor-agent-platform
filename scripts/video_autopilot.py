@@ -47,9 +47,8 @@ MIN_SEGMENT_SEC = 2.0      # minimum segment duration
 MERGE_GAP_SEC = 1.0        # merge segments closer than this
 SPEECH_PAD_SEC = 0.5       # pad speech segments to avoid mid-word cuts
 CUT_PAD_SEC = 3.0          # buffer around approved segments
-SCENE_THRESHOLD = 0.3      # ffmpeg scene change threshold
 RMS_THRESHOLD = 0.01       # audio RMS intensity threshold
-VISION_CONFIDENCE = 0.7    # Qwen highlight confidence threshold
+VISION_CONFIDENCE = 0.8    # Qwen highlight confidence threshold
 CHECKPOINT_VERSION = 2
 MAX_HTTP_RETRIES = 3
 HTTP_BASE_DELAY = 2.0
@@ -226,33 +225,16 @@ def probe_video(video_path):
 
 def analyze_audio(video_path, whisper_model="small"):
     """
-    Transcribe audio with faster-whisper on GPU.
+    Transcribe audio with faster-whisper on GPU (CUDA, float16).
     Returns list of {"start", "end", "text"} speech segments.
     Frees VRAM after completion (the "4070 switch").
     """
     log.info("[AUDIO] Loading faster-whisper model=%s on GPU...", whisper_model)
 
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        log.warning("[AUDIO] faster-whisper not installed. Skipping audio analysis.")
-        return []
+    from faster_whisper import WhisperModel
 
-    # Try GPU first, fall back to CPU on OOM
-    model = None
-    device_used = "cuda"
-    try:
-        model = WhisperModel(whisper_model, device="cuda", compute_type="float16")
-        log.info("[AUDIO] Model loaded on CUDA (float16)")
-    except Exception as e:
-        log.warning("[AUDIO] CUDA failed (%s), falling back to CPU", e)
-        device_used = "cpu"
-        try:
-            model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
-            log.info("[AUDIO] Model loaded on CPU (int8)")
-        except Exception as e2:
-            log.error("[AUDIO] Cannot load whisper model: %s", e2)
-            return []
+    model = WhisperModel(whisper_model, device="cuda", compute_type="float16")
+    log.info("[AUDIO] Model loaded on CUDA (float16)")
 
     try:
         log.info("[AUDIO] Transcribing...")
@@ -273,51 +255,44 @@ def analyze_audio(video_path, whisper_model="small"):
             })
 
         elapsed = time.time() - t0
-        log.info("[AUDIO] Transcription complete: %d segments in %.1fs (device=%s)", len(speech), elapsed, device_used)
+        log.info("[AUDIO] Transcription complete: %d segments in %.1fs", len(speech), elapsed)
         return speech
 
     finally:
         # FREE VRAM — critical for RTX 4070 12GB
         del model
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                log.info("[AUDIO] VRAM freed (torch.cuda.empty_cache)")
-        except ImportError:
-            pass
+        import torch
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        log.info("[AUDIO] VRAM freed (torch.cuda.empty_cache)")
 
 
 def compute_audio_rms(video_path, start, end):
     """Compute RMS audio intensity for a time range using ffmpeg."""
-    try:
-        duration = end - start
-        if duration <= 0:
-            return 0.0
-        args = [
-            "ffmpeg", "-v", "error",
-            "-ss", str(start), "-t", str(duration),
-            "-i", str(video_path),
-            "-af", "volumedetect",
-            "-f", "null", "-",
-        ]
-        result = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
-        stderr = result.stderr.decode(errors="replace")
-        match = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", stderr)
-        if match:
-            db = float(match.group(1))
-            # Convert dB to linear RMS (0 dB = 1.0)
-            rms = 10 ** (db / 20)
-            return rms
+    duration = end - start
+    if duration <= 0:
         return 0.0
-    except Exception:
-        return 0.0
+    args = [
+        "ffmpeg", "-v", "error",
+        "-ss", str(start), "-t", str(duration),
+        "-i", str(video_path),
+        "-af", "volumedetect",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    stderr = result.stderr.decode(errors="replace")
+    match = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", stderr)
+    if match:
+        db = float(match.group(1))
+        # Convert dB to linear RMS (0 dB = 1.0)
+        rms = 10 ** (db / 20)
+        return rms
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -355,36 +330,8 @@ def extract_frame_base64(video_path, timestamp):
         timeout=30,
     )
     if result.returncode != 0 or not result.stdout:
-        return None
+        raise RuntimeError(f"Failed to extract frame at {timestamp}s")
     return base64.b64encode(result.stdout).decode("ascii")
-
-
-def detect_scene_changes(video_path, threshold=SCENE_THRESHOLD):
-    """Detect scene changes using ffmpeg. Returns list of timestamps."""
-    log.info("[SCENE] Detecting scene changes (threshold=%.2f)...", threshold)
-    try:
-        args = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v",
-            "-show_entries", "frame=pts_time",
-            "-of", "csv=p=0",
-            "-f", "lavfi",
-            f"movie={video_path},select='gt(scene\\,{threshold})'",
-        ]
-        out = run_cmd(args, timeout=600)
-        timestamps = []
-        for line in out.strip().split("\n"):
-            line = line.strip()
-            if line:
-                try:
-                    timestamps.append(float(line))
-                except ValueError:
-                    pass
-        log.info("[SCENE] Found %d scene changes", len(timestamps))
-        return timestamps
-    except Exception as e:
-        log.warning("[SCENE] Scene detection failed: %s", e)
-        return []
 
 
 def classify_frame_ollama(frame_b64, timestamp, ollama_url, model):
@@ -420,26 +367,15 @@ def classify_frame_ollama(frame_b64, timestamp, ollama_url, model):
 
     # Parse JSON from response
     match = re.search(r"\{[\s\S]*?\}", text)
-    if match:
-        try:
-            data = json.loads(match.group())
-            return {
-                "timestamp": timestamp,
-                "is_highlight": bool(data.get("is_highlight", False)),
-                "confidence": float(data.get("confidence", 0.5)),
-                "reason": str(data.get("reason", "")),
-            }
-        except (json.JSONDecodeError, ValueError):
-            pass
+    if not match:
+        raise RuntimeError(f"Ollama returned no JSON for frame at {timestamp}s: {text[:200]}")
 
-    # Fallback: check for yes/no keywords
-    text_lower = text.lower()
-    is_hl = "true" in text_lower or "yes" in text_lower
+    data = json.loads(match.group())
     return {
         "timestamp": timestamp,
-        "is_highlight": is_hl,
-        "confidence": 0.5,
-        "reason": text[:100],
+        "is_highlight": bool(data.get("is_highlight", False)),
+        "confidence": float(data.get("confidence", 0.5)),
+        "reason": str(data.get("reason", "")),
     }
 
 
@@ -469,17 +405,6 @@ def analyze_vision(video_path, duration, ollama_url, model,
         if start_idx > 0:
             log.info("[VISION] Resuming from frame %d/%d", start_idx, total_frames)
 
-    # Check Ollama connectivity
-    ollama_available = True
-    try:
-        urllib.request.urlopen(f"{ollama_url}/v1/models", timeout=5)
-    except Exception:
-        log.warning("[VISION] Ollama not reachable at %s. Using scene-detection fallback.", ollama_url)
-        ollama_available = False
-
-    if not ollama_available:
-        return _scene_detect_to_vision_results(video_path, duration)
-
     # Process frames in batches
     progress_interval = max(1, total_frames // 100)  # log every 1%
     t0 = time.time()
@@ -490,21 +415,8 @@ def analyze_vision(video_path, duration, ollama_url, model,
         for i in range(batch_start, batch_end):
             ts = timestamps[i]
             frame_b64 = extract_frame_base64(video_path, ts)
-            if not frame_b64:
-                log.debug("[VISION] Failed to extract frame at %.1fs, skipping", ts)
-                continue
-
-            try:
-                result = classify_frame_ollama(frame_b64, ts, ollama_url, model)
-                results.append(result)
-            except Exception as e:
-                log.warning("[VISION] Frame %.1fs failed: %s", ts, e)
-                results.append({
-                    "timestamp": ts,
-                    "is_highlight": False,
-                    "confidence": 0.0,
-                    "reason": f"error: {e}",
-                })
+            result = classify_frame_ollama(frame_b64, ts, ollama_url, model)
+            results.append(result)
 
             # Progress logging
             if (i + 1) % progress_interval == 0 or i == total_frames - 1:
@@ -533,25 +445,6 @@ def analyze_vision(video_path, duration, ollama_url, model,
     return results
 
 
-def _scene_detect_to_vision_results(video_path, duration):
-    """Fallback: use scene detection when Ollama is unavailable."""
-    scene_times = detect_scene_changes(video_path)
-    if not scene_times:
-        # Ultimate fallback: evenly spaced highlights
-        interval = get_sample_interval(duration)
-        scene_times = [i * interval for i in range(int(duration / interval))]
-
-    results = []
-    for ts in scene_times:
-        results.append({
-            "timestamp": ts,
-            "is_highlight": True,
-            "confidence": 0.6,
-            "reason": "scene change detected",
-        })
-    return results
-
-
 # ---------------------------------------------------------------------------
 # Phase 3: Merge + Consensus filter + EditPlan
 # ---------------------------------------------------------------------------
@@ -560,12 +453,14 @@ def _scene_detect_to_vision_results(video_path, duration):
 def merge_and_build_plan(speech_segments, vision_results, video_meta,
                          keep_ratio=0.45, video_path=None):
     """
-    Consensus-based filtering:
-    - Audio: RMS intensity > threshold
-    - Transcription: speech detected
-    - Vision: Qwen confidence > threshold
-    Approve segment only if criteria are met, add buffer padding.
-    Returns EditPlan dict.
+    Strict consensus-based filtering — a segment is approved ONLY when
+    all three conditions are met:
+      1. Audio: RMS intensity > RMS_THRESHOLD
+      2. Transcription: Whisper detects speech (is_speech = True)
+      3. Vision: Qwen-VL confidence score > VISION_CONFIDENCE (0.8)
+
+    Buffer: 3-second padding added to start and end of every approved cut.
+    Output: list of [start, end] timestamps → EditPlan JSON.
     """
     duration = video_meta["duration"]
     if duration <= 0:
@@ -574,77 +469,68 @@ def merge_and_build_plan(speech_segments, vision_results, video_meta,
     # Grid resolution: 0.5s for short videos, 1.0s for long
     grid_res = 0.5 if duration < 600 else 1.0
     grid_size = int(math.ceil(duration / grid_res))
-    scores = [0.0] * grid_size
 
-    # Score from speech segments (pad ±0.5s for word boundaries)
+    # --- Build per-cell boolean masks for each criterion ---
+
+    # 1. Speech mask: True if Whisper detected speech in this cell
+    has_speech = [False] * grid_size
     speech_intervals = []
     for seg in speech_segments:
         start = max(0, seg["start"] - SPEECH_PAD_SEC)
         end = min(duration, seg["end"] + SPEECH_PAD_SEC)
         speech_intervals.append((start, end))
         for i in range(int(start / grid_res), min(grid_size, int(end / grid_res) + 1)):
-            scores[i] += 2.0
+            has_speech[i] = True
 
-    # Score from vision highlights
+    # 2. Vision mask: True if Qwen confidence > VISION_CONFIDENCE at this cell
+    has_vision = [False] * grid_size
     for vr in vision_results:
         if vr.get("is_highlight") and vr.get("confidence", 0) >= VISION_CONFIDENCE:
             ts = vr["timestamp"]
-            # Spread score ±2 grid cells around the highlight frame
             center = int(ts / grid_res)
+            # Mark ±2 cells around the highlight frame
             for offset in range(-2, 3):
                 idx = center + offset
                 if 0 <= idx < grid_size:
-                    weight = 3.0 if offset == 0 else 1.5
-                    scores[idx] += weight * vr.get("confidence", 0.7)
+                    has_vision[idx] = True
 
-    # Scene change bonus (snap cut points to scene boundaries)
-    scene_times = []
-    try:
-        scene_times = detect_scene_changes(str(video_path)) if video_path else []
-    except Exception:
-        pass
-    for st in scene_times:
-        idx = int(st / grid_res)
-        for offset in range(-2, 3):
-            i = idx + offset
-            if 0 <= i < grid_size:
-                scores[i] += 1.0
-
-    # --- Consensus filtering ---
-    # Find score threshold that yields ~keep_ratio of total duration
-    target_cells = int(grid_size * keep_ratio)
-    sorted_scores = sorted(scores, reverse=True)
-    if target_cells > 0 and target_cells <= len(sorted_scores):
-        threshold = sorted_scores[min(target_cells, len(sorted_scores) - 1)]
+    # 3. Audio RMS mask: True if RMS intensity > RMS_THRESHOLD
+    #    Computed per chunk (every 5 grid cells) to keep it fast
+    has_audio = [False] * grid_size
+    if video_path and video_meta.get("has_audio"):
+        chunk_cells = 5
+        for chunk_start in range(0, grid_size, chunk_cells):
+            chunk_end = min(chunk_start + chunk_cells, grid_size)
+            t_start = chunk_start * grid_res
+            t_end = min(chunk_end * grid_res, duration)
+            rms = compute_audio_rms(video_path, t_start, t_end)
+            if rms > RMS_THRESHOLD:
+                for i in range(chunk_start, chunk_end):
+                    has_audio[i] = True
     else:
-        threshold = 0.1
+        # No audio stream — audio criterion passes (video-only content)
+        has_audio = [True] * grid_size
 
-    # Minimum threshold to avoid selecting silence/empty
-    threshold = max(threshold, 0.5)
+    # --- Consensus: approve cell ONLY if ALL three conditions are met ---
+    approved = [has_speech[i] and has_vision[i] and has_audio[i] for i in range(grid_size)]
 
-    # Select cells above threshold
-    selected = [scores[i] >= threshold for i in range(grid_size)]
+    approved_count = sum(approved)
+    log.info(
+        "[MERGE] Consensus: %d/%d cells approved (speech=%d, vision=%d, audio=%d)",
+        approved_count, grid_size,
+        sum(has_speech), sum(has_vision), sum(has_audio),
+    )
 
-    # Audio RMS consensus: verify selected regions have audible content
-    # (only for videos with audio, and only spot-check to avoid slowness)
-    if video_path and video_meta.get("has_audio") and duration < 3600:
-        # Sample RMS at segment boundaries to verify audio activity
-        _apply_rms_filter(selected, grid_res, video_path, duration)
-
-    # Convert selected cells to continuous segments
-    raw_segments = _cells_to_segments(selected, grid_res, duration)
+    # Convert approved cells to continuous segments
+    raw_segments = _cells_to_segments(approved, grid_res, duration)
 
     # Apply constraints
     segments = _apply_segment_constraints(raw_segments, duration, keep_ratio, speech_intervals)
 
     if not segments:
-        # Emergency fallback: keep first and last 10% of video
-        log.warning("[MERGE] No segments selected, using fallback (first+last 10%%)")
-        ten_pct = max(MIN_SEGMENT_SEC, duration * 0.1)
-        segments = [
-            {"src_in": 0, "src_out": ten_pct, "reason": "fallback: opening"},
-            {"src_in": max(0, duration - ten_pct), "src_out": duration, "reason": "fallback: ending"},
-        ]
+        raise RuntimeError("No segments matched the consensus filter. "
+                           "All three conditions (speech + vision confidence > 0.8 + audio RMS) must be met. "
+                           "Try lowering --keep-ratio or check that the video has audible speech and visual highlights.")
 
     # Add CUT_PAD_SEC buffer around each approved segment
     for seg in segments:
@@ -659,9 +545,6 @@ def merge_and_build_plan(speech_segments, vision_results, video_meta,
     target_dur = duration * keep_ratio
     if total_kept > target_dur * 1.15:
         segments = _trim_to_target(segments, target_dur)
-    elif total_kept < target_dur * 0.5 and len(segments) < 2:
-        # Too little content selected — expand segments
-        pass
 
     # Assign IDs
     for i, seg in enumerate(segments):
@@ -706,27 +589,6 @@ def merge_and_build_plan(speech_segments, vision_results, video_meta,
     return plan
 
 
-def _apply_rms_filter(selected, grid_res, video_path, duration):
-    """Spot-check RMS audio on selected regions. Deselect silent regions."""
-    # Sample every 10th selected cell to keep it fast
-    checked = 0
-    deselected = 0
-    for i in range(0, len(selected), 10):
-        if not selected[i]:
-            continue
-        start = i * grid_res
-        end = min(duration, start + grid_res * 5)
-        rms = compute_audio_rms(video_path, start, end)
-        checked += 1
-        if rms < RMS_THRESHOLD:
-            # Deselect this chunk — it's silent
-            for j in range(i, min(len(selected), i + 5)):
-                selected[j] = False
-            deselected += 1
-    if checked > 0:
-        log.debug("[RMS] Checked %d regions, deselected %d silent ones", checked, deselected)
-
-
 def _cells_to_segments(selected, grid_res, duration):
     """Convert boolean grid to list of {"src_in", "src_out"} segments."""
     segments = []
@@ -759,10 +621,8 @@ def _apply_segment_constraints(segments, duration, keep_ratio, speech_intervals)
     # Snap segment boundaries to speech boundaries (avoid mid-word cuts)
     for seg in segments:
         for sp_start, sp_end in speech_intervals:
-            # If segment starts inside a speech chunk, extend back
             if sp_start < seg["src_in"] < sp_end:
                 seg["src_in"] = sp_start
-            # If segment ends inside a speech chunk, extend forward
             if sp_start < seg["src_out"] < sp_end:
                 seg["src_out"] = sp_end
 
@@ -772,7 +632,6 @@ def _apply_segment_constraints(segments, duration, keep_ratio, speech_intervals)
     # Limit segment count (too many = choppy)
     max_segments = max(2, min(20, int(duration / 60)))
     if len(segments) > max_segments:
-        # Keep highest-scoring segments (by duration as proxy for confidence)
         segments.sort(key=lambda s: s["src_out"] - s["src_in"], reverse=True)
         segments = segments[:max_segments]
         segments.sort(key=lambda s: s["src_in"])
@@ -791,10 +650,8 @@ def _merge_close_segments(segments, gap_threshold):
     merged = [dict(segments[0])]
     for seg in segments[1:]:
         last = merged[-1]
-        # Overlapping or close enough to merge
         if seg["src_in"] <= last["src_out"] + gap_threshold:
             last["src_out"] = max(last["src_out"], seg["src_out"])
-            # Combine reasons if both have them
             if "reason" in seg and "reason" in last:
                 if seg["reason"] not in last["reason"]:
                     last["reason"] = last.get("reason", "") + "; " + seg.get("reason", "")
@@ -804,13 +661,12 @@ def _merge_close_segments(segments, gap_threshold):
 
 
 def _trim_to_target(segments, target_dur):
-    """Trim segments to hit target duration by shortening the longest ones."""
+    """Trim segments to hit target duration by removing the shortest ones."""
     total = sum(s["src_out"] - s["src_in"] for s in segments)
     excess = total - target_dur
     if excess <= 0:
         return segments
 
-    # Remove shortest segments first until close to target
     segments_by_dur = sorted(segments, key=lambda s: s["src_out"] - s["src_in"])
     while excess > 0 and len(segments_by_dur) > 1:
         shortest = segments_by_dur[0]
@@ -869,8 +725,6 @@ def validate_edit_plan(plan, duration):
         seg["id"] = f"s{i + 1}"
 
     plan["segments"] = segments
-
-    # Rebuild transitions
     plan["transitions"] = _assign_transitions(segments)
 
     return plan
@@ -955,7 +809,6 @@ def assemble_video(video_path, edit_plan, output_path, video_meta):
         _do_assemble(video_path, segments, transitions, output_path, video_meta,
                      needs_reencode, copy_ok, tmp_dir)
     finally:
-        # Cleanup temp files
         import shutil
         try:
             shutil.rmtree(tmp_dir)
@@ -997,7 +850,6 @@ def _do_assemble(video_path, segments, transitions, output_path, meta,
         dur = seg["src_out"] - seg["src_in"]
         log.info("[ASSEMBLE] Extracting segment %s: %.1fs → %.1fs", seg["id"], seg["src_in"], seg["src_out"])
 
-        # Always stream copy for extraction (fast), re-encode during final assembly
         extract_args = ["-c", "copy"] if copy_ok else copy_args
         ffmpeg_run([
             "-y", "-loglevel", "error",
@@ -1040,10 +892,8 @@ def _assemble_with_transitions(seg_files, segments, transitions, meta, output_pa
     for t in transitions:
         trans_map[t["from"]] = t
 
-    # Check if audio exists
     has_audio = meta.get("has_audio", False)
 
-    # Map transition types to xfade names
     xfade_map = {
         "dissolve": "dissolve",
         "fade": "fade",
@@ -1079,21 +929,6 @@ def _assemble_with_transitions(seg_files, segments, transitions, meta, output_pa
         last_v = v_out
         cumulative = offset + seg_durations[i + 1]
 
-    if not filter_parts:
-        # Fallback to concat
-        concat_file = os.path.join(tmp_dir, "concat.txt")
-        with open(concat_file, "w") as f:
-            for sf in seg_files:
-                f.write(f"file '{sf}'\n")
-        v_args, a_args = build_encoding_args(meta)
-        ffmpeg_run([
-            "-y", "-loglevel", "error",
-            "-f", "concat", "-safe", "0", "-i", concat_file,
-            *v_args, *a_args,
-            output_path,
-        ])
-        return
-
     all_filters = filter_parts + audio_parts if has_audio else filter_parts
     filter_complex = ";".join(all_filters)
 
@@ -1128,30 +963,17 @@ def _assemble_with_transitions(seg_files, segments, transitions, meta, output_pa
 
     log.info("[ASSEMBLE] Running xfade filter (%d video, %d audio filters)", len(filter_parts), len(audio_parts))
 
-    try:
-        ffmpeg_run([
-            "-y", "-loglevel", "error",
-            *input_args,
-            "-filter_complex_script", filter_script,
-            *map_args,
-            *clean_v,
-            "-fps_mode", "cfr",
-            *audio_args,
-            "-movflags", "+faststart",
-            output_path,
-        ], timeout=7200)
-    except RuntimeError as e:
-        log.warning("[ASSEMBLE] Filter complex failed (%s), falling back to concat re-encode", e)
-        concat_file = os.path.join(tmp_dir, "concat.txt")
-        with open(concat_file, "w") as f:
-            for sf in seg_files:
-                f.write(f"file '{sf}'\n")
-        ffmpeg_run([
-            "-y", "-loglevel", "error",
-            "-f", "concat", "-safe", "0", "-i", concat_file,
-            *v_args, *a_args,
-            output_path,
-        ], timeout=7200)
+    ffmpeg_run([
+        "-y", "-loglevel", "error",
+        *input_args,
+        "-filter_complex_script", filter_script,
+        *map_args,
+        *clean_v,
+        "-fps_mode", "cfr",
+        *audio_args,
+        "-movflags", "+faststart",
+        output_path,
+    ], timeout=7200)
 
 
 # ---------------------------------------------------------------------------
@@ -1190,7 +1012,6 @@ def load_checkpoint(path, video_path):
         if data.get("version") != CHECKPOINT_VERSION:
             log.warning("[CHECKPOINT] Version mismatch, ignoring checkpoint")
             return None
-        # Verify video hash if available
         if data.get("video_hash"):
             current_hash = file_hash(video_path)
             if data["video_hash"] != current_hash:
@@ -1251,7 +1072,7 @@ def run_pipeline(args):
     if checkpoint and checkpoint.get("phase") in ("vision", "plan", "done"):
         speech_segments = checkpoint.get("speech_segments", [])
         log.info("[AUDIO] Using %d cached speech segments from checkpoint", len(speech_segments))
-    elif not args.no_audio:
+    else:
         t0 = time.time()
         speech_segments = analyze_audio(video_path, args.whisper_model)
         log.info("[PIPELINE] Phase 1 (AUDIO) complete: %d speech segments in %.1fs",
@@ -1262,15 +1083,13 @@ def run_pipeline(args):
             "video_meta": video_meta,
             "speech_segments": speech_segments,
         })
-    else:
-        log.info("[AUDIO] Skipped (--no-audio)")
 
     # Phase 2: Vision
     vision_results = []
     if checkpoint and checkpoint.get("phase") in ("plan", "done"):
         vision_results = checkpoint.get("vision_results", [])
         log.info("[VISION] Using %d cached vision results from checkpoint", len(vision_results))
-    elif not args.no_vision:
+    else:
         t0 = time.time()
         vision_checkpoint = checkpoint if checkpoint and checkpoint.get("phase") == "vision" else None
         vision_results = analyze_vision(
@@ -1289,10 +1108,6 @@ def run_pipeline(args):
             "speech_segments": speech_segments,
             "vision_results": vision_results,
         })
-    else:
-        log.info("[VISION] Skipped (--no-vision)")
-        # Use scene detection as fallback
-        vision_results = _scene_detect_to_vision_results(video_path, video_meta["duration"])
 
     # Phase 3: Merge → EditPlan
     t0 = time.time()
@@ -1363,7 +1178,6 @@ Examples:
   %(prog)s input.mp4
   %(prog)s input.mp4 -o highlights.mp4 --keep-ratio 0.4
   %(prog)s input.mp4 --plan-only > edit_plan.json
-  %(prog)s input.mp4 --no-vision          # scene-detect only, no Ollama
   %(prog)s input.mp4 --resume checkpoint.json
         """,
     )
@@ -1371,13 +1185,11 @@ Examples:
     parser.add_argument("-o", "--output", help="Output video path (default: <input>_highlights.mp4)")
     parser.add_argument(
         "--keep-ratio", type=float, default=0.45,
-        help="Target ratio of video to keep (0.1–0.9, default: 0.45)",
+        help="Target ratio of video to keep (0.1-0.9, default: 0.45)",
     )
     parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama server URL")
     parser.add_argument("--vision-model", default="qwen2.5vl:7b", help="Ollama vision model name")
     parser.add_argument("--whisper-model", default="small", help="Whisper model size (tiny/small/medium/large)")
-    parser.add_argument("--no-audio", action="store_true", help="Skip speech analysis")
-    parser.add_argument("--no-vision", action="store_true", help="Skip AI vision (use scene detection only)")
     parser.add_argument("--resume", help="Path to checkpoint JSON to resume from")
     parser.add_argument("--plan-only", action="store_true", help="Output EditPlan JSON without rendering")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
