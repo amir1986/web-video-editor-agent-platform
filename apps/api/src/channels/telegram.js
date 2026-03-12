@@ -202,6 +202,10 @@ class TelegramChannel extends BaseChannel {
       const result = await processVideo(tmpIn, name, this.maxUpload, (text) => {
         this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
       });
+      console.log(`[Telegram] processVideo returned: output=${result.outputPath}, segments=${result.segCount}`);
+
+      const outSize = fs.statSync(result.outputPath).size;
+      console.log(`[Telegram] Output file: ${(outSize / 1024 / 1024).toFixed(1)}MB`);
 
       const compNote = result.compressed ? " (compressed for Telegram)" : "";
       await this.bot.api.editMessageText(
@@ -214,6 +218,7 @@ class TelegramChannel extends BaseChannel {
       const uploadCtrl = new AbortController();
       const uploadTimeout = setTimeout(() => uploadCtrl.abort(), 10 * 60 * 1000);
       try {
+        console.log("[Telegram] Uploading video to Telegram...");
         await this.bot.api.sendVideo(chatId, new InputFile(result.outputPath), {
           caption,
           width: result.width || undefined,
@@ -221,11 +226,14 @@ class TelegramChannel extends BaseChannel {
           duration: result.duration || undefined,
           supports_streaming: true,
         }, uploadCtrl.signal);
-      } catch {
+        console.log("[Telegram] Video sent successfully");
+      } catch (uploadErr) {
+        console.log(`[Telegram] sendVideo failed (${uploadErr.message}), trying sendDocument...`);
         await this.bot.api.sendDocument(chatId, new InputFile(result.outputPath), {
           caption,
           filename: `${name}_edited.mp4`,
         }, uploadCtrl.signal);
+        console.log("[Telegram] Document sent successfully");
       } finally {
         clearTimeout(uploadTimeout);
       }
