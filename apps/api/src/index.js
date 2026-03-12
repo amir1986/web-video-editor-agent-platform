@@ -363,11 +363,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   const { vArgs: srcVideoArgs, aArgs: srcAudioArgs } = buildSourceMatchEncodingArgs(sourceQuality, rc);
   const qFpsMode = rc.fps_mode || "cfr";
 
-  // Check if source codec allows stream copy
-  const canCopy = await probeCanStreamCopy(wslIn);
-  const copyOrReencode = canCopy ? ["-c", "copy"] : srcVideoArgs;
-  const copyLabel = canCopy ? "stream copy" : "re-encode (source-matched)";
-  console.log(`[RENDER] Strategy: ${copyLabel}, needsReencode=${(editPlan.transitions || []).some(t => t.type !== "hard_cut")}, segments=${segments.length}`);
+  // Always re-encode for frame-accurate cuts — stream copy with pre-input -ss
+  // seeks to the nearest keyframe, causing stuck/frozen frames at segment boundaries.
+  console.log(`[RENDER] Strategy: re-encode (source-matched), needsReencode=${(editPlan.transitions || []).some(t => t.type !== "hard_cut")}, segments=${segments.length}`);
 
   // Build a lookup of transitions by source segment id
   const transMap = {};
@@ -380,8 +378,8 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   // Single segment, no soft transitions
   if (segments.length === 1 && !needsReencode) {
     const seg = segments[0];
-    console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
-    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...copyOrReencode, "-avoid_negative_ts", "make_zero", wslOut]);
+    console.log(`[RENDER] Single segment: ${seg.src_in}s → ${seg.src_out}s (re-encode source-matched)`);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...srcVideoArgs, ...srcAudioArgs, "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", wslOut]);
     return;
   }
 
@@ -391,8 +389,10 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-      console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (${copyLabel})`);
-      await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...copyOrReencode, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
+      console.log(`[RENDER] Segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (re-encode for accuracy)`);
+      // Always re-encode for frame-accurate cuts — stream copy with pre-input -ss
+      // seeks to the nearest keyframe, causing stuck/frozen frames at segment boundaries.
+      await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...srcVideoArgs, ...srcAudioArgs, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
       segFiles.push(segPath);
     }
     const concatFile = path.join(tmpDir, "concat.txt");
@@ -407,13 +407,17 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   // (hard_cut becomes a very short fade to keep the filter graph uniform).
   const FADE_DURATION = 0.5; // seconds for soft transition overlap
 
-  // Extract each segment to its own file (stream copy — no quality loss yet)
+  // Extract each segment to its own file.
+  // Re-encode during extraction for frame-accurate cuts — stream copy with
+  // pre-input -ss seeks to the nearest keyframe, leaving stuck/broken frames
+  // at the start of each segment. Since segments are re-encoded in the
+  // filter_complex step anyway, using a high-quality intermediate is lossless.
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
     console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s`);
-    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), "-c", "copy", "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...srcVideoArgs, ...srcAudioArgs, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
     segFiles.push(segPath);
   }
 
@@ -578,21 +582,16 @@ app.post("/api/trim", authMiddleware, express.raw({ type: "*/*", limit: "2gb" })
 
     // Probe source quality BEFORE any processing
     const sourceQuality = await probeSourceQuality(wslIn);
-    const canCopy = await probeCanStreamCopy(wslIn);
 
-    let codecArgs;
-    if (canCopy) {
-      codecArgs = ["-c", "copy"];
-    } else {
-      // Re-encode using source-matched params (bitrate, resolution, fps)
-      const { vArgs } = buildSourceMatchEncodingArgs(sourceQuality, {});
-      codecArgs = vArgs;
-    }
+    // Always re-encode for frame-accurate trim — stream copy with pre-input -ss
+    // seeks to the nearest keyframe, causing stuck/frozen frames at the start.
+    const { vArgs, aArgs } = buildSourceMatchEncodingArgs(sourceQuality, {});
+    const codecArgs = [...vArgs, ...aArgs];
     const inputSize = fs.statSync(tmpIn).size;
     console.log(`[TRIM] Input: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
-    console.log(`[TRIM] in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (${canCopy ? "stream copy" : "re-encode source-matched"})`);
+    console.log(`[TRIM] in=${inSec}s out=${outSec}s duration=${outSec - inSec}s (re-encode source-matched)`);
     console.log(`[TRIM] ffmpeg args: ${codecArgs.join(" ")}`);
-    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(inSec), "-i", wslIn, "-t", String(outSec - inSec), ...codecArgs, "-avoid_negative_ts", "make_zero", wslOut]);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(inSec), "-i", wslIn, "-t", String(outSec - inSec), ...codecArgs, "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", wslOut]);
     const outputSize = fs.statSync(tmpOut).size;
     console.log(`[TRIM] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
     res.set("Content-Type", "video/mp4");
