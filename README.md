@@ -12,7 +12,7 @@ cd web-video-editor-agent-platform
 npm install
 
 # Install Ollama: https://ollama.com
-ollama pull qwen2.5vl:7b
+ollama pull qwen3-vl:8b
 
 npm run dev
 ```
@@ -25,7 +25,7 @@ This single command starts everything:
 | API | [http://localhost:3001](http://localhost:3001) | Express server (ffmpeg, AI pipeline) |
 | Bot | — | Multi-channel messaging bot (idle if no tokens set) |
 
-**Requirements:** Node.js >= 18, ffmpeg/ffprobe installed and on PATH, Ollama with `qwen2.5vl:7b`.
+**Requirements:** Node.js >= 18, ffmpeg/ffprobe installed and on PATH, Ollama with `qwen3-vl:8b`.
 
 > **No bot tokens?** — Bot prints available channels and stays idle. Does not crash.
 > **No `.env` file?** — Everything uses sensible defaults.
@@ -86,7 +86,7 @@ python scripts/video_autopilot.py input.mp4 --plan-only > edit_plan.json
 python scripts/video_autopilot.py input.mp4 --resume .input_autopilot_checkpoint.json
 ```
 
-**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen2.5vl:7b.
+**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen3-vl:8b.
 
 ### How it works
 
@@ -166,8 +166,8 @@ All configuration is optional. `npm run dev` works without any `.env` file.
 
 # LLM — only needed for /api/auto-edit and bot AI features
 OLLAMA_URL=http://localhost:11434/v1/chat/completions   # default
-VISION_MODEL=qwen2.5vl:7b                              # default
-TEXT_MODEL=qwen2.5vl:7b                                 # default
+VISION_MODEL=qwen3-vl:8b                              # default
+TEXT_MODEL=qwen3-vl:8b                                 # default
 
 # Auth (optional — disabled by default)
 AUTH_SECRET=your-secret

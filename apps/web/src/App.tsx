@@ -183,12 +183,12 @@ export default function App() {
         setModelsList(models);
         setOllamaConnected(true);
         const qwen = models.find((m: { id: string }) => m.id.includes("qwen"));
-        setSelectedModel(qwen?.id || models[0]?.id || "qwen2.5vl:7b");
+        setSelectedModel(qwen?.id || models[0]?.id || "qwen3-vl:8b");
       } catch (e) {
         console.error("[Ollama] init failed:", e);
         setOllamaConnected(false);
-        setModelsList([{ id: "qwen2.5vl:7b", label: "qwen2.5vl:7b" }]);
-        setSelectedModel("qwen2.5vl:7b");
+        setModelsList([{ id: "qwen3-vl:8b", label: "qwen3-vl:8b" }]);
+        setSelectedModel("qwen3-vl:8b");
       }
     })();
   }, []);
