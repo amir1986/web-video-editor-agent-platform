@@ -445,9 +445,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   // Calculate actual segment durations from extracted files (more reliable)
   const segDurations = segments.map(s => s.src_out - s.src_in);
 
-  // Build the xfade filter chain. Every transition uses xfade to keep
-  // a uniform filter graph (no mixing concat + xfade which is invalid).
-  // For "hard_cut" transitions, use a very short fade (0.001s) that is invisible.
+  // Build the filter chain using concat for hard cuts and xfade for soft
+  // transitions. Previous approach used xfade with 0.001s for hard cuts,
+  // which caused severe visual corruption/artifacts at segment boundaries.
   let filterParts = [];
   let audioParts = [];
   let lastVideoLabel = "[0:v]";
@@ -457,23 +457,30 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   for (let i = 0; i < segments.length - 1; i++) {
     const trans = transMap[segments[i].id];
     const tType = trans?.type || "hard_cut";
-
-    // Use real fade for soft transitions, negligible fade for hard cuts
-    const fadeDur = tType === "hard_cut" ? 0.001 : FADE_DURATION;
-    const offset = Math.max(0, cumulativeOffset - fadeDur);
     const outLabel = `[v${i + 1}]`;
     const aOutLabel = `[a${i + 1}]`;
 
-    filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
-    if (hasAudio) {
-      audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${fadeDur}${aOutLabel}`);
-      lastAudioLabel = aOutLabel;
+    if (tType === "hard_cut") {
+      // Use concat filter for clean hard cuts — no overlap, no artifacts
+      filterParts.push(`${lastVideoLabel}[${i + 1}:v]concat=n=2:v=1:a=0${outLabel}`);
+      if (hasAudio) {
+        audioParts.push(`${lastAudioLabel}[${i + 1}:a]concat=n=2:v=0:a=1${aOutLabel}`);
+        lastAudioLabel = aOutLabel;
+      }
+      cumulativeOffset += segDurations[i + 1]; // No overlap for hard cuts
+    } else {
+      // Use xfade for soft transitions (dissolve, fade, etc.)
+      const fadeDur = FADE_DURATION;
+      const offset = Math.max(0, cumulativeOffset - fadeDur);
+      filterParts.push(`${lastVideoLabel}[${i + 1}:v]xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
+      if (hasAudio) {
+        audioParts.push(`${lastAudioLabel}[${i + 1}:a]acrossfade=d=${fadeDur}${aOutLabel}`);
+        lastAudioLabel = aOutLabel;
+      }
+      // xfade overlaps by fadeDur, so net position = offset + next segment duration
+      cumulativeOffset = offset + segDurations[i + 1];
     }
     lastVideoLabel = outLabel;
-
-    // Track cumulative position: next segment starts at (offset + fadeDur) + next segment's duration
-    // but xfade overlaps by fadeDur, so net position = offset + segDurations[i+1]
-    cumulativeOffset = offset + segDurations[i + 1];
   }
 
   try {
