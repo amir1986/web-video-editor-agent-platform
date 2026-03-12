@@ -22,7 +22,7 @@ test.describe("Ollama Status", () => {
     // Should have at least one real option (not "Loading models…")
     await expect(select.locator("option")).not.toHaveCount(0);
     // Check for mocked model name
-    await expect(select).toContainText("qwen2.5vl:7b");
+    await expect(select).toContainText("qwen3-vl:8b");
   });
 
   test("shows green dot when Ollama is connected", async ({ page }) => {

@@ -7,7 +7,7 @@
  */
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434/v1/chat/completions";
-const VISION_MODEL = process.env.VISION_MODEL || "qwen2.5vl:7b";
+const VISION_MODEL = process.env.VISION_MODEL || "qwen3-vl:8b";
 const TEXT_MODEL = process.env.TEXT_MODEL || VISION_MODEL;
 
 // Use undici directly so we can set headersTimeout/bodyTimeout beyond the

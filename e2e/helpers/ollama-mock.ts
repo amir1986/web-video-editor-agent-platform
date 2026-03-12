@@ -9,7 +9,7 @@ export async function mockOllama(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         models: [
-          { name: "qwen2.5vl:7b", modified_at: "2025-01-01T00:00:00Z", size: 4_000_000_000 },
+          { name: "qwen3-vl:8b", modified_at: "2025-01-01T00:00:00Z", size: 4_000_000_000 },
           { name: "llama3:8b", modified_at: "2025-01-01T00:00:00Z", size: 5_000_000_000 },
         ],
       }),
