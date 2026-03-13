@@ -153,7 +153,7 @@ The platform learns each videographer's editing style over time:
 **Key properties:**
 - No configuration required on first use — style builds up automatically.
 - Fingerprint extraction is non-fatal: if Qwen fails, the project count still increments.
-- Profiles are per-user, stored as flat JSON files in `data/styles/`.
+- Profiles stored in SQLite (`data/styles.db`) — full SQL queries, indexes, no entry cap.
 - All entry points (Web UI, API, Telegram, WebChat) pass user identity through the pipeline.
 - Style can be reset at any time via the UI or `DELETE /api/style-profile/:userId`.
 
@@ -175,6 +175,9 @@ AUTH_SECRET=your-secret
 # Server (optional)
 PORT=3001
 CORS_ORIGIN=http://localhost:5173
+
+# Style Engine (optional — defaults to data/styles.db)
+STYLE_DB_PATH=data/styles.db
 
 # WebChat (optional — browser-based chat via WebSocket)
 WEBCHAT_ENABLED=true
@@ -225,7 +228,7 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 | AI | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
 | AI (Python) | faster-whisper (GPU), Qwen3 VL via Ollama, ffmpeg scene detection |
 | Backend | Express.js, ffmpeg/ffprobe |
-| Persistence | IndexedDB (client), flat-file JSON (server) |
+| Persistence | IndexedDB (client), SQLite (server) |
 
 ## Project Structure
 
@@ -233,7 +236,7 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 apps/web/          Frontend (React + Tailwind + shadcn/ui + Ollama)
 apps/api/          Backend (Express + ffmpeg + AI pipeline + Style Engine)
 packages/core/     Shared TypeScript types
-data/styles/       Per-videographer style fingerprints (gitignored, auto-created)
+data/styles.db     SQLite database — style fingerprints + delivery history (gitignored)
 scripts/
   video_autopilot.py   Python GPU video editor (RTX 4070 optimized)
   requirements.txt     Python dependencies

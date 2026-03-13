@@ -346,7 +346,12 @@ await testAsync("runEditPipeline accepts styleContext option", async () => {
 
 console.log("\n--- Style Store ---");
 
-const { getOrCreateProfile, updateFingerprint, deleteProfile, loadProfile, FINGERPRINT_THRESHOLD } = require("./ai/style-store");
+// Use a temp database for tests so we don't pollute production data
+const os = require("os");
+const _testDbPath = require("path").join(os.tmpdir(), `style_test_${Date.now()}.db`);
+process.env.STYLE_DB_PATH = _testDbPath;
+
+const { getOrCreateProfile, updateFingerprint, deleteProfile, loadProfile, closeDb, FINGERPRINT_THRESHOLD } = require("./ai/style-store");
 
 const TEST_USER = "__test_user_" + Date.now();
 
@@ -374,10 +379,33 @@ test("updateFingerprint accumulates", () => {
   assert(profile.history.length === 2, "Expected 2 history entries");
 });
 
+test("updateFingerprint stores deliveryMeta and fingerprint snapshot", () => {
+  const fp3 = { cutRhythm: "slow", avgSegmentDuration: 8.0 };
+  const meta = { sourceChannel: "telegram", videoDuration: 120.5, videoResolution: "1920x1080" };
+  const profile = updateFingerprint(TEST_USER, fp3, { segments: 2 }, meta);
+  assert(profile.projectCount === 3, `Expected projectCount=3, got ${profile.projectCount}`);
+  const lastEntry = profile.history[profile.history.length - 1];
+  assert(lastEntry.sourceChannel === "telegram", `Expected sourceChannel=telegram, got ${lastEntry.sourceChannel}`);
+  assert(lastEntry.videoDuration === 120.5, `Expected videoDuration=120.5, got ${lastEntry.videoDuration}`);
+  assert(lastEntry.videoResolution === "1920x1080", `Expected videoResolution=1920x1080`);
+  assert(lastEntry.fingerprintSnapshot !== null, "Expected fingerprint snapshot");
+  assert(lastEntry.fingerprintSnapshot.cutRhythm === "slow", "Expected snapshot to match fingerprint");
+});
+
+test("history has no entry cap", () => {
+  const testUser = "__test_nocap_" + Date.now();
+  for (let i = 0; i < 25; i++) {
+    updateFingerprint(testUser, { i }, { n: i });
+  }
+  const profile = loadProfile(testUser);
+  assert(profile.history.length === 25, `Expected 25 history entries, got ${profile.history.length}`);
+  deleteProfile(testUser);
+});
+
 test("loadProfile returns saved data", () => {
   const profile = loadProfile(TEST_USER);
   assert(profile !== null, "Expected profile to exist");
-  assert(profile.projectCount === 2, "Expected projectCount=2");
+  assert(profile.projectCount === 3, "Expected projectCount=3");
 });
 
 test("deleteProfile removes data", () => {
@@ -431,6 +459,10 @@ test("resolveStyle returns guided when threshold met", () => {
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
+
+// Clean up test database
+closeDb();
+try { require("fs").unlinkSync(_testDbPath); } catch {}
 
 console.log(`\n${"=".repeat(40)}`);
 console.log(`Tests: ${passed} passed, ${failed} failed, ${passed + failed} total`);
