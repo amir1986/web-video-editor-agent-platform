@@ -31,15 +31,6 @@ This single command starts everything:
 > **No `.env` file?** — Everything uses sensible defaults.
 > **No Ollama?** — API's ffmpeg endpoints (trim, render, merge) still work. Only AI features need Ollama.
 
-## What `npm run dev` Starts
-
-```
-npm run dev
-  ├── api   → Express server on :3001 (always works, ffmpeg endpoints ready)
-  ├── bot   → Multi-channel bot (stays idle if no tokens configured)
-  └── web   → Vite dev server on :5173 (React UI)
-```
-
 ## Web UI
 
 1. **Import** — Click "Import Video" or drag-and-drop (only video files accepted)
@@ -129,20 +120,11 @@ curl -X POST http://localhost:3001/api/render \
   -F "video=@input.mp4" -F "editPlan=$(cat plan.json)" -o output.mp4
 ```
 
-## How AI Works
+## AI Pipeline
 
-Both the web UI and API use **Ollama** (local) for all AI operations.
+All AI runs through **Ollama** (local). Default model: `qwen3-vl:8b-thinking` — override via `VISION_MODEL` / `TEXT_MODEL` env vars.
 
-```
-Web UI → fetch() → localhost:11434 → Ollama → Qwen model
-API    → HTTP    → localhost:11434 → Ollama → Qwen model
-```
-
-**Model selection:**
-- Web UI fetches available models from `GET /api/tags` on Ollama and populates a dropdown.
-- Default model: `qwen3-vl:8b-thinking`. Override via `VISION_MODEL` / `TEXT_MODEL` env vars.
-
-**Agent pipeline (7 agents, server-side):**
+**7-agent pipeline (server-side):**
 
 ```
 STYLE → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
@@ -207,7 +189,7 @@ SLACK_APP_TOKEN=...
 
 ## API
 
-These endpoints power the ffmpeg operations (trim, render, merge, overlay). The web UI calls them directly.
+REST endpoints for video processing, AI auto-edit, and style management. The web UI calls them directly.
 
 | Method | Endpoint | Description | Needs Ollama? |
 |---|---|---|---|
@@ -240,11 +222,10 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 | Layer | Tech |
 |---|---|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
-| AI (browser) | Ollama (local) — direct fetch to localhost:11434 |
-| AI (server) | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
+| AI | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
 | AI (Python) | faster-whisper (GPU), Qwen3 VL via Ollama, ffmpeg scene detection |
 | Backend | Express.js, ffmpeg/ffprobe |
-| Persistence | IndexedDB (client), filesystem (server) |
+| Persistence | IndexedDB (client), flat-file JSON (server) |
 
 ## Project Structure
 
