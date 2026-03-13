@@ -163,6 +163,11 @@ async function extractFrames(wslIn, duration, count) {
 // Multi-agent editing pipeline with cookbook enhancements
 const { runEditPipeline, setProgressCallback } = require("./ai/agents");
 
+// Adaptive Style Engine (v2)
+const { resolveStyle } = require("./ai/style-resolver");
+const { buildFingerprint } = require("./ai/fingerprint-builder");
+const { getOrCreateProfile, loadProfile, deleteProfile, FINGERPRINT_THRESHOLD } = require("./ai/style-store");
+
 /**
  * Probe video dimensions and frame rate via ffprobe.
  */
@@ -564,7 +569,7 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
 //  Client receives lines like: {"type":"progress","agent":"CUT","message":"..."}
 //  Last line:                   {"type":"result","editPlan":{...},"summary":"..."}
 app.post("/api/analyze", authMiddleware, async (req, res) => {
-  const { duration, frames, width, height, fps } = req.body;
+  const { duration, frames, width, height, fps, userId } = req.body;
 
   // Stream NDJSON progress to the client in real-time
   res.setHeader("Content-Type", "application/x-ndjson");
@@ -581,6 +586,13 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
   });
 
   try {
+    // Adaptive Style Engine (v2): resolve videographer style
+    const styleResult = resolveStyle(userId || null);
+    if (styleResult.profile) {
+      sendLine({ type: "progress", agent: "STYLE", message: styleResult.mode === "guided" ? `Guided mode — using style from ${styleResult.profile.projectCount} approved projects` : `Discovery mode — ${styleResult.remaining} projects until style lock-in`, ts: Date.now() });
+      sendLine({ type: "style", mode: styleResult.mode, projectCount: styleResult.profile.projectCount, threshold: FINGERPRINT_THRESHOLD, ts: Date.now() });
+    }
+
     sendLine({ type: "progress", agent: "SYSTEM", message: "Starting analysis...", ts: Date.now() });
 
     const frameData = (frames || []).map((f, i) => ({
@@ -588,7 +600,7 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
       base64: f
     }));
     const videoMeta = { duration, fps: fps || 30, width: width || 0, height: height || 0 };
-    const editPlan = await runEditPipeline(videoMeta, frameData);
+    const editPlan = await runEditPipeline(videoMeta, frameData, null, { styleContext: styleResult.styleContext });
 
     // Final result line
     sendLine({
@@ -596,6 +608,7 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
       editPlan,
       segments: editPlan.segments,
       summary: `${editPlan.segments.length} highlights selected`,
+      styleMode: styleResult.mode,
     });
     res.end();
   } catch (err) {
@@ -655,6 +668,7 @@ app.get("/api/auto-edit/status", authMiddleware, (req, res) => {
 app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name   = req.query.name || "video";
+  const botUserId = req.query.userId || req.headers["x-user-id"] || null;
   const queuePos = getQueuePosition();
   if (queuePos.queued > 0) {
     console.log(`[AUTO-EDIT] Request queued (position ${queuePos.queued + 1})`);
@@ -670,6 +684,12 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
         const inputSize = fs.statSync(tmpIn).size;
         console.log(`[AUTO-EDIT] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
         const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+
+        // Adaptive Style Engine (v2): resolve videographer style
+        const styleResult = resolveStyle(botUserId);
+        if (botUserId) {
+          console.log(`[AUTO-EDIT] Style: user=${botUserId}, mode=${styleResult.mode}, projects=${styleResult.profile?.projectCount || 0}`);
+        }
 
         // Probe video metadata
         const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
@@ -691,9 +711,9 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
         console.log(`[AUTO-EDIT] Extracting ${frameCount} frames...`);
         const frames = await extractFrames(wslIn, duration, frameCount);
 
-        // Run multi-agent pipeline: Cut → Structure → Continuity → Transition → Constraints
+        // Run multi-agent pipeline: [Style] → Cut → Structure → Continuity → Transition → Constraints
         console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
-        const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
+        const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn, styleContext: styleResult.styleContext });
 
         const segments = editPlan.segments || [];
         const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
@@ -716,6 +736,8 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
         res.set("X-Video-Width", String(videoMeta.width));
         res.set("X-Video-Height", String(videoMeta.height));
         res.set("X-Video-Duration", String(Math.round(finalDuration)));
+        res.set("X-Style-Mode", styleResult.mode);
+        res.set("X-Project-Count", String(styleResult.profile?.projectCount || 0));
         res.sendFile(tmpOut, (err) => {
           if (err) console.error("[AUTO-EDIT] sendFile error:", err.message);
           cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
@@ -905,6 +927,72 @@ app.post("/api/auth/login", (req, res) => {
 
 app.get("/api/auth/verify", authMiddleware, (req, res) => {
   res.json({ valid: true, user: req.user || { uid: "anonymous" } });
+});
+
+// ---------------------------------------------------------------------------
+// Adaptive Style Engine endpoints (v2)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/approve-delivery — Approve an edit and trigger fingerprint extraction.
+ * Body: { userId, editPlan, videoMeta }
+ * After approval, Qwen analyzes the approved edit and builds/merges a style fingerprint.
+ */
+app.post("/api/approve-delivery", authMiddleware, async (req, res) => {
+  const { userId, editPlan, videoMeta } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId is required" });
+  if (!editPlan?.segments?.length) return res.status(400).json({ error: "editPlan with segments is required" });
+  if (!videoMeta?.duration) return res.status(400).json({ error: "videoMeta with duration is required" });
+
+  try {
+    const profile = getOrCreateProfile(userId);
+    const existingFp = profile.fingerprint;
+    const projectCount = profile.projectCount;
+
+    console.log(`[APPROVE] Building fingerprint for user=${userId}, project #${projectCount + 1}`);
+    const updatedProfile = await buildFingerprint(userId, editPlan, videoMeta, existingFp, projectCount);
+
+    res.json({
+      ok: true,
+      projectCount: updatedProfile.projectCount,
+      mode: updatedProfile.projectCount >= FINGERPRINT_THRESHOLD ? "guided" : "discovery",
+      remaining: Math.max(0, FINGERPRINT_THRESHOLD - updatedProfile.projectCount),
+      fingerprintKeys: updatedProfile.fingerprint ? Object.keys(updatedProfile.fingerprint) : [],
+    });
+  } catch (err) {
+    console.error("[APPROVE ERROR]", err);
+    res.status(500).json({ error: "Approval processing failed" });
+  }
+});
+
+/**
+ * GET /api/style-profile/:userId — Get a videographer's style profile.
+ * Returns fingerprint, project count, mode, and history.
+ */
+app.get("/api/style-profile/:userId", authMiddleware, (req, res) => {
+  const profile = loadProfile(req.params.userId);
+  if (!profile) return res.json({ exists: false, projectCount: 0, mode: "discovery", fingerprint: null, threshold: FINGERPRINT_THRESHOLD });
+
+  res.json({
+    exists: true,
+    userId: profile.userId,
+    projectCount: profile.projectCount,
+    mode: profile.projectCount >= FINGERPRINT_THRESHOLD ? "guided" : "discovery",
+    remaining: Math.max(0, FINGERPRINT_THRESHOLD - profile.projectCount),
+    threshold: FINGERPRINT_THRESHOLD,
+    fingerprint: profile.fingerprint,
+    history: profile.history,
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt,
+  });
+});
+
+/**
+ * DELETE /api/style-profile/:userId — Reset a videographer's style profile.
+ */
+app.delete("/api/style-profile/:userId", authMiddleware, (req, res) => {
+  deleteProfile(req.params.userId);
+  res.json({ ok: true, message: "Style profile reset" });
 });
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1201,9 @@ app.listen(PORT, () => {
   console.log("  POST /api/trim             - Single segment trim");
   console.log("  POST /api/auto-edit        - Full highlight reel (bots)");
   console.log("  POST /api/auto-edit-stream - Full highlight reel with SSE progress");
+  console.log("  POST /api/approve-delivery - Approve edit & build style fingerprint (v2)");
+  console.log("  GET  /api/style-profile/:id- Get videographer style profile (v2)");
+  console.log("  DEL  /api/style-profile/:id- Reset style profile (v2)");
   console.log("  POST /api/overlay          - Burn text overlays onto video");
   console.log("  POST /api/adjust-audio     - Adjust audio volume");
   console.log("  POST /api/merge            - Merge multiple videos");

@@ -84,9 +84,11 @@ class WebChatChannel extends BaseChannel {
     try {
       fs.writeFileSync(tmpIn, data);
 
+      // Style Engine: use WebChat session ID as videographer identity
+      const wcUserId = `wc_${sessionId}`;
       const result = await processVideo(tmpIn, meta.name, this.maxUpload, (text) => {
         send({ type: "progress", text });
-      });
+      }, { userId: wcUserId });
 
       send({
         type: "complete",
@@ -96,6 +98,8 @@ class WebChatChannel extends BaseChannel {
         width: result.width,
         height: result.height,
         duration: result.duration,
+        styleMode: result.styleMode,
+        projectCount: result.projectCount,
       });
 
       // Send the video binary back

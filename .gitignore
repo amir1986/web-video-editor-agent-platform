@@ -10,6 +10,9 @@ issues/
 *.pem
 *.key
 
+# Style Engine fingerprint data
+data/styles/
+
 # Playwright E2E
 e2e/fixtures/
 e2e/test-results/

@@ -12,7 +12,7 @@ cd web-video-editor-agent-platform
 npm install
 
 # Install Ollama: https://ollama.com
-ollama pull qwen3-vl:8b
+ollama pull qwen3-vl:8b-thinking
 
 npm run dev
 ```
@@ -25,30 +25,23 @@ This single command starts everything:
 | API | [http://localhost:3001](http://localhost:3001) | Express server (ffmpeg, AI pipeline) |
 | Bot | — | Multi-channel messaging bot (idle if no tokens set) |
 
-**Requirements:** Node.js >= 18, ffmpeg/ffprobe installed and on PATH, Ollama with `qwen3-vl:8b`.
+**Requirements:** Node.js >= 18, ffmpeg/ffprobe installed and on PATH, Ollama with `qwen3-vl:8b-thinking`.
 
 > **No bot tokens?** — Bot prints available channels and stays idle. Does not crash.
 > **No `.env` file?** — Everything uses sensible defaults.
 > **No Ollama?** — API's ffmpeg endpoints (trim, render, merge) still work. Only AI features need Ollama.
 
-## What `npm run dev` Starts
-
-```
-npm run dev
-  ├── api   → Express server on :3001 (always works, ffmpeg endpoints ready)
-  ├── bot   → Multi-channel bot (stays idle if no tokens configured)
-  └── web   → Vite dev server on :5173 (React UI)
-```
-
 ## Web UI
 
 1. **Import** — Click "Import Video" or drag-and-drop (only video files accepted)
-2. **AI Auto-Edit** — Click "Auto Edit with AI" to run the 6-agent pipeline via Ollama
+2. **AI Auto-Edit** — Click "Auto Edit with AI" to run the 7-agent pipeline via Ollama
 3. **Model** — Select any model from the dropdown (populated from Ollama's local models)
-4. **Timeline** — Click segments to jump, remove with ×, or use In/Out sliders
-5. **Text Overlays** — Add text with size, color, position, and time range
-6. **Audio** — Adjust volume (0-200%)
-7. **Export** — Rendered via ffmpeg (server-side), downloaded to browser
+4. **Approve & Learn** — After a successful edit, approve the delivery so the AI learns your style
+5. **Style Profile** — View your style progress, mode (Discovery / Guided), fingerprint, and reset
+6. **Timeline** — Click segments to jump, remove with ×, or use In/Out sliders
+7. **Text Overlays** — Add text with size, color, position, and time range
+8. **Audio** — Adjust volume (0-200%)
+9. **Export** — Rendered via ffmpeg (server-side), downloaded to browser
 
 **Supported video formats:** `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.flv`, `.wmv`, `.m4v`
 
@@ -86,14 +79,14 @@ python scripts/video_autopilot.py input.mp4 --plan-only > edit_plan.json
 python scripts/video_autopilot.py input.mp4 --resume .input_autopilot_checkpoint.json
 ```
 
-**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen3-vl:8b.
+**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen3-vl:8b-thinking.
 
 ### How it works
 
 ```
 Phase 0: PROBE    → ffprobe metadata (duration, codec, fps, bitrate)
 Phase 1: AUDIO    → faster-whisper (GPU) → speech timestamps → free VRAM
-Phase 2: VISION   → Ollama qwen2.5-vl → frame classification (batched)
+Phase 2: VISION   → Ollama qwen3-vl → frame classification (batched)
 Phase 3: MERGE    → consensus filter → segment list → EditPlan JSON
 Phase 4: ASSEMBLE → ffmpeg -c copy (lossless) or filter_complex
 ```
@@ -127,27 +120,19 @@ curl -X POST http://localhost:3001/api/render \
   -F "video=@input.mp4" -F "editPlan=$(cat plan.json)" -o output.mp4
 ```
 
-## How AI Works
+## AI Pipeline
 
-Both the web UI and API use **Ollama** (local) for all AI operations.
+All AI runs through **Ollama** (local). Default model: `qwen3-vl:8b-thinking` — override via `VISION_MODEL` / `TEXT_MODEL` env vars.
 
-```
-Web UI → fetch() → localhost:11434 → Ollama → Qwen model
-API    → HTTP    → localhost:11434 → Ollama → Qwen model
-```
-
-**Model selection:**
-- Web UI fetches available models from `GET /api/tags` on Ollama and populates a dropdown.
-- Defaults to Qwen models when available.
-
-**Agent pipeline (runs in-browser for web UI, server-side for API):**
+**7-agent pipeline (server-side):**
 
 ```
-Frames → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
+STYLE → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
 ```
 
 | Agent | Type | What it does |
 |---|---|---|
+| STYLE | Style Engine | Loads videographer fingerprint; injects style context into LLM agents |
 | CUT | LLM + vision | Selects 2-6 best segments from video frames |
 | STRUCTURE | LLM | Reorders for best narrative arc |
 | CONTINUITY | LLM | Smooths boundaries between adjacent cuts |
@@ -156,6 +141,21 @@ Frames → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → Q
 | QUALITY GUARD | Deterministic | Enforces resolution, aspect ratio, codec settings |
 
 Each LLM agent falls back to deterministic logic if the AI call fails.
+
+### Adaptive Style Engine (v2)
+
+The platform learns each videographer's editing style over time:
+
+1. **Discovery mode** (projects 1–3) — AI makes all creative decisions autonomously.
+2. **After each approved delivery** — Qwen analyzes the approved edit and extracts a **style fingerprint** (opaque JSON metadata — the schema is decided by Qwen, not the developer). The new fingerprint is merged with the existing one using weighted averaging.
+3. **Guided mode** (project 4+) — The fingerprint is injected into every LLM agent's prompt as the primary creative brief, so edits converge on the videographer's established style.
+
+**Key properties:**
+- No configuration required on first use — style builds up automatically.
+- Fingerprint extraction is non-fatal: if Qwen fails, the project count still increments.
+- Profiles are per-user, stored as flat JSON files in `data/styles/`.
+- All entry points (Web UI, API, Telegram, WebChat) pass user identity through the pipeline.
+- Style can be reset at any time via the UI or `DELETE /api/style-profile/:userId`.
 
 ## Configuration
 
@@ -166,8 +166,8 @@ All configuration is optional. `npm run dev` works without any `.env` file.
 
 # LLM — only needed for /api/auto-edit and bot AI features
 OLLAMA_URL=http://localhost:11434/v1/chat/completions   # default
-VISION_MODEL=qwen3-vl:8b                              # default
-TEXT_MODEL=qwen3-vl:8b                                 # default
+VISION_MODEL=qwen3-vl:8b-thinking                      # default
+TEXT_MODEL=qwen3-vl:8b-thinking                        # default
 
 # Auth (optional — disabled by default)
 AUTH_SECRET=your-secret
@@ -175,6 +175,10 @@ AUTH_SECRET=your-secret
 # Server (optional)
 PORT=3001
 CORS_ORIGIN=http://localhost:5173
+
+# WebChat (optional — browser-based chat via WebSocket)
+WEBCHAT_ENABLED=true
+WEBCHAT_PORT=3980
 
 # Bot channels (optional — set any to enable that channel)
 TELEGRAM_BOT_TOKEN=...
@@ -185,7 +189,7 @@ SLACK_APP_TOKEN=...
 
 ## API
 
-These endpoints power the ffmpeg operations (trim, render, merge, overlay). The web UI calls them directly.
+REST endpoints for video processing, AI auto-edit, and style management. The web UI calls them directly.
 
 | Method | Endpoint | Description | Needs Ollama? |
 |---|---|---|---|
@@ -196,6 +200,9 @@ These endpoints power the ffmpeg operations (trim, render, merge, overlay). The 
 | `POST` | `/api/overlay` | Burn text overlays | No |
 | `POST` | `/api/adjust-audio` | Adjust volume (`?volume=150`) | No |
 | `POST` | `/api/merge` | Merge multiple videos (validates video files) | No |
+| `POST` | `/api/approve-delivery` | Approve edit & extract style fingerprint via Qwen | Yes |
+| `GET` | `/api/style-profile/:userId` | Get style profile, fingerprint, mode, history | No |
+| `DELETE` | `/api/style-profile/:userId` | Reset style profile | No |
 
 ```bash
 # Full auto-edit via REST (needs Ollama running)
@@ -215,18 +222,18 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 | Layer | Tech |
 |---|---|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
-| AI (browser) | Ollama (local) — direct fetch to localhost:11434 |
-| AI (server) | Multi-agent pipeline (6 agents), Ollama (Qwen 2.5 VL), RAG knowledge base |
-| AI (Python) | faster-whisper (GPU), Qwen 2.5 VL via Ollama, ffmpeg scene detection |
+| AI | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
+| AI (Python) | faster-whisper (GPU), Qwen3 VL via Ollama, ffmpeg scene detection |
 | Backend | Express.js, ffmpeg/ffprobe |
-| Persistence | IndexedDB (client), filesystem (server) |
+| Persistence | IndexedDB (client), flat-file JSON (server) |
 
 ## Project Structure
 
 ```
 apps/web/          Frontend (React + Tailwind + shadcn/ui + Ollama)
-apps/api/          Backend (Express + ffmpeg + AI pipeline)
+apps/api/          Backend (Express + ffmpeg + AI pipeline + Style Engine)
 packages/core/     Shared TypeScript types
+data/styles/       Per-videographer style fingerprints (gitignored, auto-created)
 scripts/
   video_autopilot.py   Python GPU video editor (RTX 4070 optimized)
   requirements.txt     Python dependencies

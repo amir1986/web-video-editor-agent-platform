@@ -106,9 +106,10 @@ async function compressVideo(inputPath, outputPath, maxBytes) {
  * @param {string}   videoName    - Original filename (without extension)
  * @param {number}   maxUpload    - Max upload bytes (0 = no limit)
  * @param {function} onProgress   - (message: string) => void
+ * @param {object}   options      - { userId } for style engine (optional)
  * @returns {{ outputPath: string, summary: string, segCount: string, compressed: boolean, width: number, height: number, duration: number }}
  */
-async function processVideo(inputPath, videoName, maxUpload, onProgress) {
+async function processVideo(inputPath, videoName, maxUpload, onProgress, options = {}) {
   const tmpOut = tmpFile("mp4");
   const tmpCompressed = tmpFile("mp4");
 
@@ -121,9 +122,10 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
     const videoBuffer = fs.readFileSync(inputPath);
     // Use Node's built-in http.request with generous timeouts.
     // The API calls the LLM which can take several minutes on large files.
-    console.log(`[PROCESS] Sending to API: ${API_URL}/api/auto-edit`);
+    const userIdParam = options.userId ? `&userId=${encodeURIComponent(options.userId)}` : "";
+    console.log(`[PROCESS] Sending to API: ${API_URL}/api/auto-edit (userId=${options.userId || "none"})`);
     const { statusCode, headers: resHeaders, body: resBody } = await new Promise((resolve, reject) => {
-      const url = new URL(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}`);
+      const url = new URL(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}${userIdParam}`);
       const req = http.request({
         hostname: url.hostname,
         port: url.port,
@@ -157,6 +159,8 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
     const width = parseInt(resHeaders["x-video-width"]) || 0;
     const height = parseInt(resHeaders["x-video-height"]) || 0;
     const duration = parseInt(resHeaders["x-video-duration"]) || 0;
+    const styleMode = resHeaders["x-style-mode"] || "discovery";
+    const projectCount = parseInt(resHeaders["x-project-count"]) || 0;
 
     // Compress if needed
     let outputPath = tmpOut;
@@ -171,7 +175,7 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress) {
       compressed = true;
     }
 
-    return { outputPath, summary, segCount, compressed, width, height, duration, _tmpOut: tmpOut, _tmpCompressed: tmpCompressed };
+    return { outputPath, summary, segCount, compressed, width, height, duration, styleMode, projectCount, _tmpOut: tmpOut, _tmpCompressed: tmpCompressed };
   } catch (err) {
     cleanup(tmpOut, tmpCompressed);
     throw err;

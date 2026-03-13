@@ -1188,7 +1188,7 @@ Examples:
         help="Target ratio of video to keep (0.1-0.9, default: 0.45)",
     )
     parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama server URL")
-    parser.add_argument("--vision-model", default="qwen3-vl:8b", help="Ollama vision model name")
+    parser.add_argument("--vision-model", default="qwen3-vl:8b-thinking", help="Ollama vision model name")
     parser.add_argument("--whisper-model", default="small", help="Whisper model size (tiny/small/medium/large)")
     parser.add_argument("--resume", help="Path to checkpoint JSON to resume from")
     parser.add_argument("--plan-only", action="store_true", help="Output EditPlan JSON without rendering")
