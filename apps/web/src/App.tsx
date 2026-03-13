@@ -76,6 +76,8 @@ type AIStep = typeof AI_STEPS[number];
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
 const STYLE_THRESHOLD = 4;
+// Default Ollama model — single source of truth for the UI fallback.
+const DEFAULT_MODEL = "qwen3-vl:8b-thinking";
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
@@ -204,12 +206,12 @@ export default function App() {
         setModelsList(models);
         setOllamaConnected(true);
         const qwen = models.find((m: { id: string }) => m.id.includes("qwen"));
-        setSelectedModel(qwen?.id || models[0]?.id || "qwen3-vl:32b-thinking");
+        setSelectedModel(qwen?.id || models[0]?.id || DEFAULT_MODEL);
       } catch (e) {
         console.error("[Ollama] init failed:", e);
         setOllamaConnected(false);
-        setModelsList([{ id: "qwen3-vl:32b-thinking", label: "qwen3-vl:32b-thinking" }]);
-        setSelectedModel("qwen3-vl:32b-thinking");
+        setModelsList([{ id: DEFAULT_MODEL, label: DEFAULT_MODEL }]);
+        setSelectedModel(DEFAULT_MODEL);
       }
     })();
   }, []);
