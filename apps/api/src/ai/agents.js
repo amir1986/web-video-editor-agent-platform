@@ -1,19 +1,25 @@
 /**
  * Multi-agent video editing system.
  *
- * Pipeline: Cut → Structure → Continuity → Transition → Constraints → Quality Guard
+ * v2 Pipeline: [Style Resolve] → Cut → Structure → Continuity → Transition → Constraints → Quality Guard
  *
  * Each agent receives the video metadata + frames + previous agent output,
  * makes its own decisions via LLM (or deterministic fallback), and passes
  * the evolving EditPlan to the next agent.
+ *
+ * Adaptive Style Engine (v2):
+ * - Projects 1-3: AI analyzes footage autonomously (v1 behavior)
+ * - Project 4+: Style fingerprint is injected into LLM agents as primary creative brief
+ * - Fingerprint is opaque JSON decided by Qwen, stored per-videographer
  *
  * The system produces an EditPlan JSON that an external renderer executes.
  * Agents ONLY handle: cuts, structure, continuity, transitions, constraint validation, quality auditing.
  * They do NOT do: color grading, audio mixing, music, captions, VFX, thumbnails.
  *
  * Patterns applied:
- * - Ollama LLM client (Qwen 2.5 VL) with retry/backoff
+ * - Ollama LLM client (Qwen 2.5 VL / Qwen3 VL 32B Thinking) with retry/backoff
  * - RAG knowledge base injection for editing decisions
+ * - Style fingerprint injection for returning videographers
  * - SSE progress events for real-time pipeline updates
  */
 
@@ -51,6 +57,7 @@ function emitProgress(agent, message, data = {}) {
 async function runCutAgent(videoMeta, frames, options = {}) {
   const { duration, fps, width, height } = videoMeta;
   const timestamps = frames.map(f => `${f.timestamp}s`).join(", ");
+  const styleContext = options.styleContext || "";
 
   // RAG: Inject relevant editing knowledge (cookbook pattern)
   const ragContext = getEditingContext("cut selection highlight keep remove dead air", videoMeta);
@@ -58,7 +65,7 @@ async function runCutAgent(videoMeta, frames, options = {}) {
   const systemPrompt = `You are the CUT AGENT — a world-class professional video editor whose only job is deciding what to keep and what to remove.
 
 You receive video metadata and sampled frames. You select the strongest segments to keep for a highlight edit.
-
+${styleContext}
 RULES:
 - Select 2-6 segments that together cover 30%-60% of the original duration.
 - Total kept time MUST be less than ${(duration * 0.75).toFixed(1)} seconds.
@@ -100,15 +107,16 @@ Analyze the video and decide which parts to keep for the highlight reel.`;
 // 2. Structure Agent — arranges segments into a coherent highlights edit
 // ---------------------------------------------------------------------------
 
-async function runStructureAgent(videoMeta, cutResult) {
+async function runStructureAgent(videoMeta, cutResult, options = {}) {
   const { duration, width, height } = videoMeta;
   const segmentsJSON = JSON.stringify(cutResult.segments);
+  const styleContext = options.styleContext || "";
 
   // RAG: Inject narrative and pacing knowledge (cookbook pattern)
   const ragContext = getEditingContext("narrative structure hook climax pacing ordering engagement", videoMeta);
 
   const systemPrompt = `You are the STRUCTURE AGENT — a professional video editor who arranges selected clips into a coherent, engaging highlights edit.
-
+${styleContext}
 You receive segments chosen by the Cut Agent. Your job is to:
 - Reorder segments if a different order creates a better narrative arc (hook → buildup → climax → resolution).
 - Adjust segment boundaries slightly (±1s) if it improves pacing or removes awkward frames at edges.
@@ -135,14 +143,16 @@ Return ONLY valid JSON:
 // 3. Continuity Agent — reviews for jarring cuts and fixes flow
 // ---------------------------------------------------------------------------
 
-async function runContinuityAgent(videoMeta, structureResult) {
+async function runContinuityAgent(videoMeta, structureResult, options = {}) {
   const { duration } = videoMeta;
   const segmentsJSON = JSON.stringify(structureResult.segments);
+  const styleContext = options.styleContext || "";
 
   // RAG: Inject continuity and transition knowledge (cookbook pattern)
   const ragContext = getEditingContext("continuity jarring cuts smooth transition audio visual flow", videoMeta);
 
   const systemPrompt = `You are the CONTINUITY AGENT — an expert editor focused on smooth flow between cuts.
+${styleContext}
 
 You receive an ordered list of segments. Review adjacent pairs for potential jarring transitions:
 - Large jumps in visual content or motion between segment boundaries
@@ -503,17 +513,25 @@ function buildFallbackCutResult(duration) {
  * @param {object} videoMeta     - { duration, fps, width, height }
  * @param {Array}  frames        - [{ timestamp, base64 }, ...] (may be empty)
  * @param {object} sourceQuality - Original video params from probeSourceQuality() (optional)
- * @param {object} options       - { videoPath } for tool use context
+ * @param {object} options       - { videoPath, styleContext } for tool use and style engine
  * @returns {object} EditPlan JSON
  */
 async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, options = {}) {
+  const styleContext = options.styleContext || null;
   const log = (agent, msg) => emitProgress(agent, msg);
+
+  // 0. Style context
+  if (styleContext) {
+    log("STYLE", `Guided mode — injecting videographer style fingerprint`);
+  } else {
+    log("STYLE", "Discovery mode — AI makes all creative decisions autonomously");
+  }
 
   // 1. Cut Agent
   log("CUT", "Selecting best segments...");
   let cutResult;
   try {
-    cutResult = await runCutAgent(videoMeta, frames, { videoPath: options.videoPath });
+    cutResult = await runCutAgent(videoMeta, frames, { videoPath: options.videoPath, styleContext });
     log("CUT", `Selected ${cutResult.segments?.length} segments: ${cutResult.cut_notes || ""}`);
   } catch (err) {
     log("CUT", `AI failed (${err.message}), using time-based fallback`);
@@ -542,7 +560,7 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, opt
   log("STRUCTURE", "Arranging segments for best narrative...");
   let structureResult;
   try {
-    structureResult = await runStructureAgent(videoMeta, cutResult);
+    structureResult = await runStructureAgent(videoMeta, cutResult, { styleContext });
     log("STRUCTURE", structureResult.structure_notes || "done");
   } catch (err) {
     log("STRUCTURE", `Failed (${err.message}), keeping original order`);
@@ -553,7 +571,7 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, opt
   log("CONTINUITY", "Checking for jarring cuts...");
   let continuityResult;
   try {
-    continuityResult = await runContinuityAgent(videoMeta, structureResult);
+    continuityResult = await runContinuityAgent(videoMeta, structureResult, { styleContext });
     log("CONTINUITY", continuityResult.continuity_notes || "done");
   } catch (err) {
     log("CONTINUITY", `Failed (${err.message}), skipping`);

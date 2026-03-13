@@ -331,6 +331,103 @@ await testAsync("runEditPipeline returns valid plan (fallback mode)", async () =
   assert(plan.render_constraints.target_height === 1080);
 });
 
+await testAsync("runEditPipeline accepts styleContext option", async () => {
+  const videoMeta = { duration: 60, fps: 30, width: 1920, height: 1080 };
+  const styleContext = "--- TEST STYLE ---\nPrefer fast cuts, 3-5 segments.\n--- END ---";
+  const plan = await runEditPipeline(videoMeta, [], null, { styleContext });
+  assert(plan.segments, "Plan should have segments with styleContext");
+  assert(plan.segments.length > 0, "Plan should have at least 1 segment");
+  assert(plan.quality_guard.constraints_ok === true, "Quality guard should pass");
+});
+
+// ---------------------------------------------------------------------------
+// Style Store Tests
+// ---------------------------------------------------------------------------
+
+console.log("\n--- Style Store ---");
+
+const { getOrCreateProfile, updateFingerprint, deleteProfile, loadProfile, FINGERPRINT_THRESHOLD } = require("./ai/style-store");
+
+const TEST_USER = "__test_user_" + Date.now();
+
+test("getOrCreateProfile creates new profile", () => {
+  const profile = getOrCreateProfile(TEST_USER);
+  assert(profile.userId === TEST_USER, `Expected userId=${TEST_USER}`);
+  assert(profile.projectCount === 0, "Expected projectCount=0");
+  assert(profile.fingerprint === null, "Expected null fingerprint");
+  assert(Array.isArray(profile.history), "Expected history array");
+});
+
+test("updateFingerprint increments count", () => {
+  const fp = { cutRhythm: "fast", avgSegmentDuration: 3.5 };
+  const profile = updateFingerprint(TEST_USER, fp, { segments: 4 });
+  assert(profile.projectCount === 1, `Expected projectCount=1, got ${profile.projectCount}`);
+  assert(profile.fingerprint.cutRhythm === "fast", "Expected fingerprint data");
+  assert(profile.history.length === 1, "Expected 1 history entry");
+});
+
+test("updateFingerprint accumulates", () => {
+  const fp2 = { cutRhythm: "medium", avgSegmentDuration: 5.0 };
+  const profile = updateFingerprint(TEST_USER, fp2, { segments: 3 });
+  assert(profile.projectCount === 2, `Expected projectCount=2, got ${profile.projectCount}`);
+  assert(profile.fingerprint.cutRhythm === "medium", "Expected updated fingerprint");
+  assert(profile.history.length === 2, "Expected 2 history entries");
+});
+
+test("loadProfile returns saved data", () => {
+  const profile = loadProfile(TEST_USER);
+  assert(profile !== null, "Expected profile to exist");
+  assert(profile.projectCount === 2, "Expected projectCount=2");
+});
+
+test("deleteProfile removes data", () => {
+  deleteProfile(TEST_USER);
+  const profile = loadProfile(TEST_USER);
+  assert(profile === null, "Expected profile to be null after delete");
+});
+
+test("FINGERPRINT_THRESHOLD is 4", () => {
+  assert(FINGERPRINT_THRESHOLD === 4, `Expected threshold=4, got ${FINGERPRINT_THRESHOLD}`);
+});
+
+// ---------------------------------------------------------------------------
+// Style Resolver Tests
+// ---------------------------------------------------------------------------
+
+console.log("\n--- Style Resolver ---");
+
+const { resolveStyle } = require("./ai/style-resolver");
+
+test("resolveStyle returns discovery for null userId", () => {
+  const result = resolveStyle(null);
+  assert(result.mode === "discovery", "Expected discovery mode");
+  assert(result.styleContext === null, "Expected null styleContext");
+  assert(result.profile === null, "Expected null profile");
+});
+
+test("resolveStyle returns discovery for new user", () => {
+  const result = resolveStyle("__test_new_user_" + Date.now());
+  assert(result.mode === "discovery", "Expected discovery mode for new user");
+  assert(result.styleContext === null, "Expected null styleContext for new user");
+  assert(result.profile !== null, "Expected profile to be created");
+  // Cleanup
+  deleteProfile(result.profile.userId);
+});
+
+test("resolveStyle returns guided when threshold met", () => {
+  const uid = "__test_guided_" + Date.now();
+  const fp = { testStyle: true };
+  for (let i = 0; i < FINGERPRINT_THRESHOLD; i++) {
+    updateFingerprint(uid, fp, { test: true });
+  }
+  const result = resolveStyle(uid);
+  assert(result.mode === "guided", `Expected guided mode, got ${result.mode}`);
+  assert(result.styleContext !== null, "Expected styleContext string");
+  assert(result.styleContext.includes("STYLE FINGERPRINT"), "Expected fingerprint header in context");
+  // Cleanup
+  deleteProfile(uid);
+});
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------

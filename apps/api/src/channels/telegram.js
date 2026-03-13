@@ -199,19 +199,22 @@ class TelegramChannel extends BaseChannel {
       await this._downloadFile(media.file_id, media.file_size, chatId, msg.message_id, tmpIn);
       const name = media.file_name?.replace(/\.[^/.]+$/, "") || "video";
 
+      // Style Engine: use Telegram user ID as videographer identity
+      const tgUserId = `tg_${msg.from?.id || chatId}`;
       const result = await processVideo(tmpIn, name, this.maxUpload, (text) => {
         this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
-      });
-      console.log(`[Telegram] processVideo returned: output=${result.outputPath}, segments=${result.segCount}`);
+      }, { userId: tgUserId });
+      console.log(`[Telegram] processVideo returned: output=${result.outputPath}, segments=${result.segCount}, style=${result.styleMode}`);
 
       const outSize = fs.statSync(result.outputPath).size;
       console.log(`[Telegram] Output file: ${(outSize / 1024 / 1024).toFixed(1)}MB`);
 
       const compNote = result.compressed ? " (compressed for Telegram)" : "";
+      const styleNote = result.styleMode === "guided" ? " (using your style)" : "";
       await this.bot.api.editMessageText(
         chatId,
         statusMsg.message_id,
-        `Done! ${result.segCount} highlights found${compNote}.\n${result.summary}`
+        `Done! ${result.segCount} highlights found${compNote}${styleNote}.\n${result.summary}`
       ).catch(() => {});
 
       const caption = result.summary ? `AI Edit: ${result.summary}` : "Here's your highlight reel!";

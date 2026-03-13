@@ -71,8 +71,11 @@ const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles
 
 type Tab = "ai" | "overlays" | "audio";
 
-const AI_STEPS = ["CUT", "STRUCTURE", "CONTINUITY", "TRANSITION", "CONSTRAINTS", "QUALITY_GUARD"] as const;
+const AI_STEPS = ["STYLE", "CUT", "STRUCTURE", "CONTINUITY", "TRANSITION", "CONSTRAINTS", "QUALITY_GUARD"] as const;
 type AIStep = typeof AI_STEPS[number];
+
+const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
+const STYLE_THRESHOLD = 4;
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
@@ -98,6 +101,24 @@ export default function App() {
   const [agentCurrentStep, setAgentCurrentStep] = useState<string | null>(null);
   const [dragClipIdx, setDragClipIdx] = useState<number | null>(null);
   const [sessionResumeNeeded, setSessionResumeNeeded] = useState(false);
+
+  // Adaptive Style Engine (v2)
+  const [userId] = useState<string>(() => {
+    const stored = localStorage.getItem("ve_userId");
+    if (stored) return stored;
+    const id = "web_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem("ve_userId", id);
+    return id;
+  });
+  const [styleProfile, setStyleProfile] = useState<{
+    exists: boolean;
+    projectCount: number;
+    mode: "discovery" | "guided";
+    remaining: number;
+    fingerprint: Record<string, unknown> | null;
+  } | null>(null);
+  const [approving, setApproving] = useState(false);
+  const [approveResult, setApproveResult] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressEndRef = useRef<HTMLDivElement>(null);
@@ -183,15 +204,74 @@ export default function App() {
         setModelsList(models);
         setOllamaConnected(true);
         const qwen = models.find((m: { id: string }) => m.id.includes("qwen"));
-        setSelectedModel(qwen?.id || models[0]?.id || "qwen3-vl:8b");
+        setSelectedModel(qwen?.id || models[0]?.id || "qwen3-vl:32b-thinking");
       } catch (e) {
         console.error("[Ollama] init failed:", e);
         setOllamaConnected(false);
-        setModelsList([{ id: "qwen3-vl:8b", label: "qwen3-vl:8b" }]);
-        setSelectedModel("qwen3-vl:8b");
+        setModelsList([{ id: "qwen3-vl:32b-thinking", label: "qwen3-vl:32b-thinking" }]);
+        setSelectedModel("qwen3-vl:32b-thinking");
       }
     })();
   }, []);
+
+  // Load style profile on mount
+  const loadStyleProfile = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/api/style-profile/${encodeURIComponent(userId)}`);
+      if (resp.ok) setStyleProfile(await resp.json());
+    } catch (e) {
+      console.error("[Style] Failed to load profile:", e);
+    }
+  }, [userId]);
+
+  useEffect(() => { loadStyleProfile(); }, [loadStyleProfile]);
+
+  const handleApproveDelivery = async () => {
+    if (!state.editPlan || approving) return;
+    const clip = state.clips[0];
+    if (!clip) return;
+    setApproving(true);
+    setApproveResult(null);
+    try {
+      const resp = await fetch(`${API_BASE}/api/approve-delivery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          editPlan: state.editPlan,
+          videoMeta: {
+            duration: clip.duration || duration,
+            fps: 30,
+            width: videoRef.current?.videoWidth || 0,
+            height: videoRef.current?.videoHeight || 0,
+          },
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setApproveResult(
+        data.mode === "guided"
+          ? `Style locked in! Using your style from ${data.projectCount} projects.`
+          : `Project ${data.projectCount} approved. ${data.remaining} more until style lock-in.`
+      );
+      await loadStyleProfile();
+    } catch (err) {
+      setApproveResult(`Approval failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+    setApproving(false);
+  };
+
+  const handleResetStyle = async () => {
+    try {
+      await fetch(`${API_BASE}/api/style-profile/${encodeURIComponent(userId)}`, { method: "DELETE" });
+      setStyleProfile(null);
+      setApproveResult(null);
+      await loadStyleProfile();
+      setToast("Style profile reset");
+    } catch {
+      setToast("Failed to reset style");
+    }
+  };
 
   const save = useCallback((newState: ProjectState) => {
     setState(newState);
@@ -278,8 +358,6 @@ export default function App() {
   const duration = activeClip?.duration || 0;
   const segments = state.editPlan?.segments || [];
   const transitions = state.editPlan?.transitions || [];
-
-  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
 
   const jumpToSegment = (seg: Segment) => {
     if (!videoRef.current) return;
@@ -378,13 +456,24 @@ export default function App() {
       const height = videoRef.current.videoHeight || 0;
       const fps = 30;
 
-      // ── 1. CUT AGENT (LLM + vision via Ollama) ────────────────────────────
+      // ── Step marker helper ───────────────────────────────────────────────
       const markStep = (step: string) => {
         if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
         setAgentCurrentStep(step);
         setAgentProgress(prev => [...prev, `[${step}] Running...`]);
       };
 
+      // ── 0. STYLE RESOLVER ──────────────────────────────────────────────────
+      markStep("STYLE");
+      const sp = styleProfile;
+      if (sp && sp.projectCount >= STYLE_THRESHOLD && sp.fingerprint) {
+        setAgentProgress(prev => [...prev, `[STYLE] Guided mode — using style from ${sp.projectCount} projects`]);
+      } else {
+        const remaining = sp ? STYLE_THRESHOLD - sp.projectCount : STYLE_THRESHOLD;
+        setAgentProgress(prev => [...prev, `[STYLE] Discovery mode — ${remaining} projects until style lock-in`]);
+      }
+
+      // ── 1. CUT AGENT (LLM + vision via Ollama) ────────────────────────────
       markStep("CUT");
       let cutSegments: Segment[] = [];
       try {
@@ -887,7 +976,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
             <>
               {!sessionResumeNeeded && (
                 <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
-                  AI agents analyze your video and automatically select the best highlights.
+                  AI agents analyze your video and select the best highlights. {styleProfile?.mode === "guided" ? "Using your established editing style." : "Approve edits to teach the AI your style."}
                 </div>
               )}
 
@@ -1016,6 +1105,76 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                     {agentSummary.startsWith("Error") ? "Error" : "AI Decision"}
                   </span>
                   <p className="text-xs text-foreground leading-relaxed">{agentSummary}</p>
+                </div>
+              )}
+
+              {/* ── Approve & Style Engine (v2) ─── */}
+              {state.editPlan && state.editPlan.segments.length > 0 && !agentLoading && (
+                <div className="flex flex-col gap-2">
+                  <Button
+                    variant="outline"
+                    size="default"
+                    className="w-full gap-2 border-success/40 text-success hover:bg-success/10"
+                    onClick={handleApproveDelivery}
+                    disabled={approving}
+                  >
+                    {approving ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> Learning your style...</>
+                    ) : (
+                      <><Check className="w-4 h-4" /> Approve &amp; Learn Style</>
+                    )}
+                  </Button>
+                  {approveResult && (
+                    <p className={cn("text-[11px] px-1", approveResult.includes("failed") ? "text-destructive" : "text-success")}>{approveResult}</p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Style Profile ─── */}
+              {styleProfile && (
+                <div className="flex flex-col gap-2 p-3 rounded-lg border border-border bg-secondary/50">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Style Profile</span>
+                    <Badge variant={styleProfile.mode === "guided" ? "default" : "secondary"} className="text-[9px]">
+                      {styleProfile.mode === "guided" ? "Using Your Style" : "Learning"}
+                    </Badge>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 flex flex-col gap-1">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-muted-foreground">Projects approved</span>
+                        <span className="font-mono font-bold text-foreground">{styleProfile.projectCount} / {STYLE_THRESHOLD}</span>
+                      </div>
+                      <Progress value={Math.min(100, (styleProfile.projectCount / STYLE_THRESHOLD) * 100)} className="h-1.5" />
+                    </div>
+                  </div>
+
+                  {styleProfile.mode === "discovery" && styleProfile.remaining > 0 && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {styleProfile.remaining} more approved {styleProfile.remaining === 1 ? "project" : "projects"} until style lock-in
+                    </p>
+                  )}
+
+                  {styleProfile.fingerprint && (
+                    <details className="text-[10px]">
+                      <summary className="cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
+                        View fingerprint data
+                      </summary>
+                      <pre className="mt-1.5 p-2 rounded bg-background border border-border text-[9px] font-mono text-foreground overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap">
+                        {JSON.stringify(styleProfile.fingerprint, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+
+                  {styleProfile.projectCount > 0 && (
+                    <button
+                      onClick={handleResetStyle}
+                      className="text-[9px] text-muted-foreground hover:text-destructive transition-colors text-left mt-1"
+                    >
+                      Reset style profile
+                    </button>
+                  )}
                 </div>
               )}
             </>

@@ -3,11 +3,11 @@
  *
  * Patterns applied:
  * - Retry with exponential backoff
- * - Vision support via Qwen 2.5 VL
+ * - Vision support via Qwen3 VL 32B Thinking
  */
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434/v1/chat/completions";
-const VISION_MODEL = process.env.VISION_MODEL || "qwen3-vl:8b";
+const VISION_MODEL = process.env.VISION_MODEL || "qwen3-vl:32b-thinking";
 const TEXT_MODEL = process.env.TEXT_MODEL || VISION_MODEL;
 
 // Use undici directly so we can set headersTimeout/bodyTimeout beyond the
