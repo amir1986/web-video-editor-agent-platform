@@ -43,12 +43,14 @@ npm run dev
 ## Web UI
 
 1. **Import** — Click "Import Video" or drag-and-drop (only video files accepted)
-2. **AI Auto-Edit** — Click "Auto Edit with AI" to run the 6-agent pipeline via Ollama
+2. **AI Auto-Edit** — Click "Auto Edit with AI" to run the 7-agent pipeline via Ollama
 3. **Model** — Select any model from the dropdown (populated from Ollama's local models)
-4. **Timeline** — Click segments to jump, remove with ×, or use In/Out sliders
-5. **Text Overlays** — Add text with size, color, position, and time range
-6. **Audio** — Adjust volume (0-200%)
-7. **Export** — Rendered via ffmpeg (server-side), downloaded to browser
+4. **Approve & Learn** — After a successful edit, approve the delivery so the AI learns your style
+5. **Style Profile** — View your style progress, mode (Discovery / Guided), fingerprint, and reset
+6. **Timeline** — Click segments to jump, remove with ×, or use In/Out sliders
+7. **Text Overlays** — Add text with size, color, position, and time range
+8. **Audio** — Adjust volume (0-200%)
+9. **Export** — Rendered via ffmpeg (server-side), downloaded to browser
 
 **Supported video formats:** `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.flv`, `.wmv`, `.m4v`
 
@@ -93,7 +95,7 @@ python scripts/video_autopilot.py input.mp4 --resume .input_autopilot_checkpoint
 ```
 Phase 0: PROBE    → ffprobe metadata (duration, codec, fps, bitrate)
 Phase 1: AUDIO    → faster-whisper (GPU) → speech timestamps → free VRAM
-Phase 2: VISION   → Ollama qwen2.5-vl → frame classification (batched)
+Phase 2: VISION   → Ollama qwen3-vl → frame classification (batched)
 Phase 3: MERGE    → consensus filter → segment list → EditPlan JSON
 Phase 4: ASSEMBLE → ffmpeg -c copy (lossless) or filter_complex
 ```
@@ -138,16 +140,17 @@ API    → HTTP    → localhost:11434 → Ollama → Qwen model
 
 **Model selection:**
 - Web UI fetches available models from `GET /api/tags` on Ollama and populates a dropdown.
-- Defaults to Qwen models when available.
+- Default model: `qwen3-vl:8b-thinking`. Override via `VISION_MODEL` / `TEXT_MODEL` env vars.
 
-**Agent pipeline (runs in-browser for web UI, server-side for API):**
+**Agent pipeline (7 agents, server-side):**
 
 ```
-Frames → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
+STYLE → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
 ```
 
 | Agent | Type | What it does |
 |---|---|---|
+| STYLE | Style Engine | Loads videographer fingerprint; injects style context into LLM agents |
 | CUT | LLM + vision | Selects 2-6 best segments from video frames |
 | STRUCTURE | LLM | Reorders for best narrative arc |
 | CONTINUITY | LLM | Smooths boundaries between adjacent cuts |
@@ -156,6 +159,21 @@ Frames → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → Q
 | QUALITY GUARD | Deterministic | Enforces resolution, aspect ratio, codec settings |
 
 Each LLM agent falls back to deterministic logic if the AI call fails.
+
+### Adaptive Style Engine (v2)
+
+The platform learns each videographer's editing style over time:
+
+1. **Discovery mode** (projects 1–3) — AI makes all creative decisions autonomously.
+2. **After each approved delivery** — Qwen analyzes the approved edit and extracts a **style fingerprint** (opaque JSON metadata — the schema is decided by Qwen, not the developer). The new fingerprint is merged with the existing one using weighted averaging.
+3. **Guided mode** (project 4+) — The fingerprint is injected into every LLM agent's prompt as the primary creative brief, so edits converge on the videographer's established style.
+
+**Key properties:**
+- No configuration required on first use — style builds up automatically.
+- Fingerprint extraction is non-fatal: if Qwen fails, the project count still increments.
+- Profiles are per-user, stored as flat JSON files in `data/styles/`.
+- All entry points (Web UI, API, Telegram, WebChat) pass user identity through the pipeline.
+- Style can be reset at any time via the UI or `DELETE /api/style-profile/:userId`.
 
 ## Configuration
 
@@ -175,6 +193,10 @@ AUTH_SECRET=your-secret
 # Server (optional)
 PORT=3001
 CORS_ORIGIN=http://localhost:5173
+
+# WebChat (optional — browser-based chat via WebSocket)
+WEBCHAT_ENABLED=true
+WEBCHAT_PORT=3980
 
 # Bot channels (optional — set any to enable that channel)
 TELEGRAM_BOT_TOKEN=...
@@ -196,6 +218,9 @@ These endpoints power the ffmpeg operations (trim, render, merge, overlay). The 
 | `POST` | `/api/overlay` | Burn text overlays | No |
 | `POST` | `/api/adjust-audio` | Adjust volume (`?volume=150`) | No |
 | `POST` | `/api/merge` | Merge multiple videos (validates video files) | No |
+| `POST` | `/api/approve-delivery` | Approve edit & extract style fingerprint via Qwen | Yes |
+| `GET` | `/api/style-profile/:userId` | Get style profile, fingerprint, mode, history | No |
+| `DELETE` | `/api/style-profile/:userId` | Reset style profile | No |
 
 ```bash
 # Full auto-edit via REST (needs Ollama running)
@@ -216,8 +241,8 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 |---|---|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
 | AI (browser) | Ollama (local) — direct fetch to localhost:11434 |
-| AI (server) | Multi-agent pipeline (6 agents), Ollama (Qwen 2.5 VL), RAG knowledge base |
-| AI (Python) | faster-whisper (GPU), Qwen 2.5 VL via Ollama, ffmpeg scene detection |
+| AI (server) | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
+| AI (Python) | faster-whisper (GPU), Qwen3 VL via Ollama, ffmpeg scene detection |
 | Backend | Express.js, ffmpeg/ffprobe |
 | Persistence | IndexedDB (client), filesystem (server) |
 
@@ -225,8 +250,9 @@ curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
 
 ```
 apps/web/          Frontend (React + Tailwind + shadcn/ui + Ollama)
-apps/api/          Backend (Express + ffmpeg + AI pipeline)
+apps/api/          Backend (Express + ffmpeg + AI pipeline + Style Engine)
 packages/core/     Shared TypeScript types
+data/styles/       Per-videographer style fingerprints (gitignored, auto-created)
 scripts/
   video_autopilot.py   Python GPU video editor (RTX 4070 optimized)
   requirements.txt     Python dependencies
