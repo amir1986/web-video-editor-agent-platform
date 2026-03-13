@@ -10,8 +10,11 @@ issues/
 *.pem
 *.key
 
-# Style Engine fingerprint data
+# Style Engine database (data only, not schema)
 data/styles/
+data/*.db
+data/*.db-wal
+data/*.db-shm
 
 # Playwright E2E
 e2e/fixtures/

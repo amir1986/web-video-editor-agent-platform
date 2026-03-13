@@ -939,7 +939,7 @@ app.get("/api/auth/verify", authMiddleware, (req, res) => {
  * After approval, Qwen analyzes the approved edit and builds/merges a style fingerprint.
  */
 app.post("/api/approve-delivery", authMiddleware, async (req, res) => {
-  const { userId, editPlan, videoMeta } = req.body || {};
+  const { userId, editPlan, videoMeta, sourceChannel } = req.body || {};
   if (!userId) return res.status(400).json({ error: "userId is required" });
   if (!editPlan?.segments?.length) return res.status(400).json({ error: "editPlan with segments is required" });
   if (!videoMeta?.duration) return res.status(400).json({ error: "videoMeta with duration is required" });
@@ -949,8 +949,14 @@ app.post("/api/approve-delivery", authMiddleware, async (req, res) => {
     const existingFp = profile.fingerprint;
     const projectCount = profile.projectCount;
 
+    const deliveryMeta = {
+      sourceChannel: sourceChannel || "web",
+      videoDuration: videoMeta.duration || null,
+      videoResolution: videoMeta.width && videoMeta.height ? `${videoMeta.width}x${videoMeta.height}` : null,
+    };
+
     console.log(`[APPROVE] Building fingerprint for user=${userId}, project #${projectCount + 1}`);
-    const updatedProfile = await buildFingerprint(userId, editPlan, videoMeta, existingFp, projectCount);
+    const updatedProfile = await buildFingerprint(userId, editPlan, videoMeta, existingFp, projectCount, deliveryMeta);
 
     res.json({
       ok: true,

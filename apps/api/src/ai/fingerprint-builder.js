@@ -23,9 +23,10 @@ const { updateFingerprint } = require("./style-store");
  * @param {object} videoMeta         - { duration, fps, width, height }
  * @param {object|null} existingFp   - Current fingerprint (null for first project)
  * @param {number} projectCount      - How many projects approved so far (before this one)
+ * @param {object} deliveryMeta      - { sourceChannel, videoDuration, videoResolution }
  * @returns {object} Updated profile
  */
-async function buildFingerprint(userId, editPlan, videoMeta, existingFp, projectCount) {
+async function buildFingerprint(userId, editPlan, videoMeta, existingFp, projectCount, deliveryMeta = {}) {
   const segments = editPlan.segments || [];
   const transitions = editPlan.transitions || [];
 
@@ -65,14 +66,14 @@ Analyze this approved edit and ${existingFp ? "merge with the existing fingerpri
     const fingerprint = await llmRequest(systemPrompt, userContent, { useVision: false });
 
     // Store the updated fingerprint
-    const profile = updateFingerprint(userId, fingerprint, editSummary);
+    const profile = updateFingerprint(userId, fingerprint, editSummary, deliveryMeta);
     console.log(`[FINGERPRINT] Updated for user=${userId}, project #${profile.projectCount}, keys=${Object.keys(fingerprint).join(", ")}`);
     return profile;
   } catch (err) {
     console.error(`[FINGERPRINT] Failed to build fingerprint for user=${userId}: ${err.message}`);
     // Non-fatal — don't block the user's workflow
     // Still increment the project count with null fingerprint delta
-    const profile = updateFingerprint(userId, existingFp, editSummary);
+    const profile = updateFingerprint(userId, existingFp, editSummary, deliveryMeta);
     return profile;
   }
 }

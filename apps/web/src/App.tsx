@@ -247,6 +247,7 @@ export default function App() {
             width: videoRef.current?.videoWidth || 0,
             height: videoRef.current?.videoHeight || 0,
           },
+          sourceChannel: "web",
         }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
