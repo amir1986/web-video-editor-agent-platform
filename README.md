@@ -17,114 +17,31 @@ ollama pull qwen3-vl:8b-thinking
 npm run dev
 ```
 
-This single command starts everything:
-
 | Service | URL | What it does |
 |---------|-----|-------------|
-| Web UI | [http://localhost:5173](http://localhost:5173) | Browser-based video editor (Ollama AI) |
-| API | [http://localhost:3001](http://localhost:3001) | Express server (ffmpeg, AI pipeline) |
+| Web UI | [localhost:5173](http://localhost:5173) | Browser-based video editor |
+| API | [localhost:3001](http://localhost:3001) | Express server (ffmpeg + AI pipeline) |
 | Bot | — | Multi-channel messaging bot (idle if no tokens set) |
 
-**Requirements:** Node.js >= 18, ffmpeg/ffprobe installed and on PATH, Ollama with `qwen3-vl:8b-thinking`.
+**Requirements:** Node.js >= 18, ffmpeg/ffprobe on PATH, Ollama with `qwen3-vl:8b-thinking`.
 
-> **No bot tokens?** — Bot prints available channels and stays idle. Does not crash.
-> **No `.env` file?** — Everything uses sensible defaults.
-> **No Ollama?** — API's ffmpeg endpoints (trim, render, merge) still work. Only AI features need Ollama.
+> **No bot tokens?** Bot stays idle. **No `.env`?** Sensible defaults. **No Ollama?** ffmpeg endpoints still work.
 
 ## Web UI
 
-1. **Import** — Click "Import Video" or drag-and-drop (only video files accepted)
-2. **AI Auto-Edit** — Click "Auto Edit with AI" to run the 7-agent pipeline via Ollama
-3. **Model** — Select any model from the dropdown (populated from Ollama's local models)
-4. **Approve & Learn** — After a successful edit, approve the delivery so the AI learns your style
-5. **Style Profile** — View your style progress, mode (Discovery / Guided), fingerprint, and reset
-6. **Timeline** — Click segments to jump, remove with ×, or use In/Out sliders
-7. **Text Overlays** — Add text with size, color, position, and time range
-8. **Audio** — Adjust volume (0-200%)
-9. **Export** — Rendered via ffmpeg (server-side), downloaded to browser
-
-**Supported video formats:** `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.flv`, `.wmv`, `.m4v`
-
-Non-video files are rejected with a toast notification.
+1. **Import** — Drag-and-drop or click (`.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.flv`, `.wmv`, `.m4v`)
+2. **AI Auto-Edit** — 7-agent pipeline selects highlights via Ollama
+3. **Approve & Learn** — Approve the edit so the AI learns your style
+4. **Style Profile** — View progress, mode (Discovery / Guided), fingerprint, reset
+5. **Timeline** — Click segments to jump, remove with ×, adjust In/Out
+6. **Overlays & Audio** — Text overlays with position/timing, volume 0–200%
+7. **Export** — Server-side ffmpeg render, downloaded to browser
 
 Sessions auto-save to IndexedDB and restore after refresh.
 
-## Processing Queue
-
-Auto-edit requests are processed **sequentially** — VRAM on a single GPU can only handle one AI pipeline at a time.
-
-- **Web UI:** Processes the active clip. Status indicator shows Ollama connection.
-- **API:** `/api/auto-edit` requests are queued in-memory (FIFO). If a request arrives while one is processing, it waits in the queue.
-- **Bot:** Sends one video at a time by definition. Shares the same queue with API/web requests.
-- **Queue status:** `GET /api/auto-edit/status` returns `{ queued: N, processing: bool }`.
-
-## Python Video Autopilot (GPU)
-
-Standalone Python script for GPU-accelerated video editing, optimized for NVIDIA RTX 4070 (12GB VRAM). Handles videos from 5 seconds to 10 hours.
-
-```bash
-# Install Python dependencies
-pip install -r scripts/requirements.txt
-
-# Basic usage — produces highlights reel
-python scripts/video_autopilot.py input.mp4
-
-# Custom output path and keep ratio
-python scripts/video_autopilot.py input.mp4 -o highlights.mp4 --keep-ratio 0.4
-
-# Output EditPlan JSON only (no rendering) — compatible with /api/render
-python scripts/video_autopilot.py input.mp4 --plan-only > edit_plan.json
-
-# Resume after crash (uses checkpoint file)
-python scripts/video_autopilot.py input.mp4 --resume .input_autopilot_checkpoint.json
-```
-
-**Requirements:** Python >= 3.10, ffmpeg/ffprobe, NVIDIA GPU (CUDA), Ollama with qwen3-vl:8b-thinking.
-
-### How it works
-
-```
-Phase 0: PROBE    → ffprobe metadata (duration, codec, fps, bitrate)
-Phase 1: AUDIO    → faster-whisper (GPU) → speech timestamps → free VRAM
-Phase 2: VISION   → Ollama qwen3-vl → frame classification (batched)
-Phase 3: MERGE    → consensus filter → segment list → EditPlan JSON
-Phase 4: ASSEMBLE → ffmpeg -c copy (lossless) or filter_complex
-```
-
-**VRAM management ("4070 switch"):** Whisper loads on GPU for speech detection, then the model is deleted and `torch.cuda.empty_cache()` frees VRAM before vision analysis starts. This keeps peak VRAM under 8GB.
-
-**Consensus filtering:** A segment is approved only when all three conditions are met:
-- Audio RMS intensity > threshold (audible content)
-- Whisper detects speech (`is_speech = True`)
-- Qwen-VL confidence score > 0.8
-
-A 3-second buffer is added to the start and end of every approved cut.
-
-**Dynamic sampling** adapts to video length:
-
-| Duration | Sample rate |
-|----------|------------|
-| < 1 min | 1 frame/sec |
-| 1–10 min | 1 frame/5s |
-| 10–60 min | 1 frame/10s |
-| > 1 hour | 1 frame/20s |
-
-**Resilience:** Checkpointing every 50 frames (resume with `--resume`).
-
-**EditPlan compatibility:** The JSON output is compatible with the existing `/api/render` endpoint:
-
-```bash
-# Generate plan with Python, render with Node API
-python scripts/video_autopilot.py input.mp4 --plan-only > plan.json
-curl -X POST http://localhost:3001/api/render \
-  -F "video=@input.mp4" -F "editPlan=$(cat plan.json)" -o output.mp4
-```
-
 ## AI Pipeline
 
-All AI runs through **Ollama** (local). Default model: `qwen3-vl:8b-thinking` — override via `VISION_MODEL` / `TEXT_MODEL` env vars.
-
-**7-agent pipeline (server-side):**
+Default model: `qwen3-vl:8b-thinking` — override via `VISION_MODEL` / `TEXT_MODEL` env vars.
 
 ```
 STYLE → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QUALITY GUARD → EditPlan
@@ -132,125 +49,133 @@ STYLE → CUT → STRUCTURE → CONTINUITY → TRANSITION → CONSTRAINTS → QU
 
 | Agent | Type | What it does |
 |---|---|---|
-| STYLE | Style Engine | Loads videographer fingerprint; injects style context into LLM agents |
-| CUT | LLM + vision | Selects 2-6 best segments from video frames |
+| STYLE | Style Engine | Loads videographer fingerprint, injects into LLM prompts |
+| CUT | LLM + vision | Selects 2–6 best segments from video frames |
 | STRUCTURE | LLM | Reorders for best narrative arc |
 | CONTINUITY | LLM | Smooths boundaries between adjacent cuts |
 | TRANSITION | Deterministic | Assigns hard_cut / dissolve / fade / dip_to_black |
 | CONSTRAINTS | Deterministic | Validates timing, removes overlaps, re-IDs segments |
 | QUALITY GUARD | Deterministic | Enforces resolution, aspect ratio, codec settings |
 
-Each LLM agent falls back to deterministic logic if the AI call fails.
+LLM agents fall back to deterministic logic if the AI call fails.
 
-### Adaptive Style Engine (v2)
+### Adaptive Style Engine
 
 The platform learns each videographer's editing style over time:
 
-1. **Discovery mode** (projects 1–3) — AI makes all creative decisions autonomously.
-2. **After each approved delivery** — Qwen analyzes the approved edit and extracts a **style fingerprint** (opaque JSON metadata — the schema is decided by Qwen, not the developer). The new fingerprint is merged with the existing one using weighted averaging.
-3. **Guided mode** (project 4+) — The fingerprint is injected into every LLM agent's prompt as the primary creative brief, so edits converge on the videographer's established style.
+1. **Discovery mode** (projects 1–3) — AI decides autonomously.
+2. **After each approval** — Qwen extracts a **style fingerprint** (opaque JSON — schema decided by Qwen, not the developer) and merges it with the existing one via weighted averaging.
+3. **Guided mode** (project 4+) — Fingerprint injected into every LLM agent's prompt as the primary creative brief.
 
-**Key properties:**
-- No configuration required on first use — style builds up automatically.
-- Fingerprint extraction is non-fatal: if Qwen fails, the project count still increments.
-- Profiles stored in SQLite (`data/styles.db`) — full SQL queries, indexes, no entry cap.
-- All entry points (Web UI, API, Telegram, WebChat) pass user identity through the pipeline.
-- Style can be reset at any time via the UI or `DELETE /api/style-profile/:userId`.
-
-## Configuration
-
-All configuration is optional. `npm run dev` works without any `.env` file.
-
-```bash
-# apps/api/.env (optional)
-
-# LLM — only needed for /api/auto-edit and bot AI features
-OLLAMA_URL=http://localhost:11434/v1/chat/completions   # default
-VISION_MODEL=qwen3-vl:8b-thinking                      # default
-TEXT_MODEL=qwen3-vl:8b-thinking                        # default
-
-# Auth (optional — disabled by default)
-AUTH_SECRET=your-secret
-
-# Server (optional)
-PORT=3001
-CORS_ORIGIN=http://localhost:5173
-
-# Style Engine (optional — defaults to data/styles.db)
-STYLE_DB_PATH=data/styles.db
-
-# WebChat (optional — browser-based chat via WebSocket)
-WEBCHAT_ENABLED=true
-WEBCHAT_PORT=3980
-
-# Bot channels (optional — set any to enable that channel)
-TELEGRAM_BOT_TOKEN=...
-DISCORD_BOT_TOKEN=...
-SLACK_BOT_TOKEN=...
-SLACK_APP_TOKEN=...
-```
+- Zero config on first use — style builds automatically
+- Non-fatal: if Qwen fails, project count still increments
+- Stored in SQLite (`data/styles.db`) — full SQL, indexes, no entry cap
+- All entry points (Web UI, API, Telegram, WebChat) pass user identity
+- Reset via UI or `DELETE /api/style-profile/:userId`
 
 ## API
 
-REST endpoints for video processing, AI auto-edit, and style management. The web UI calls them directly.
-
-| Method | Endpoint | Description | Needs Ollama? |
+| Method | Endpoint | Description | Ollama? |
 |---|---|---|---|
 | `POST` | `/api/auto-edit` | Full AI auto-edit — video in, video out (queued) | Yes |
-| `GET` | `/api/auto-edit/status` | Check queue position | No |
+| `GET` | `/api/auto-edit/status` | Queue position | No |
+| `POST` | `/api/approve-delivery` | Approve edit, extract style fingerprint | Yes |
+| `GET` | `/api/style-profile/:userId` | Style profile, fingerprint, history | No |
+| `DELETE` | `/api/style-profile/:userId` | Reset style profile | No |
 | `POST` | `/api/render` | Render an EditPlan | No |
 | `POST` | `/api/trim` | Trim video (`?in=5&out=15`) | No |
 | `POST` | `/api/overlay` | Burn text overlays | No |
 | `POST` | `/api/adjust-audio` | Adjust volume (`?volume=150`) | No |
-| `POST` | `/api/merge` | Merge multiple videos (validates video files) | No |
-| `POST` | `/api/approve-delivery` | Approve edit & extract style fingerprint via Qwen | Yes |
-| `GET` | `/api/style-profile/:userId` | Get style profile, fingerprint, mode, history | No |
-| `DELETE` | `/api/style-profile/:userId` | Reset style profile | No |
+| `POST` | `/api/merge` | Merge multiple videos | No |
 
 ```bash
-# Full auto-edit via REST (needs Ollama running)
+# AI auto-edit
 curl -X POST http://localhost:3001/api/auto-edit \
   --data-binary @input.mp4 -H "Content-Type: video/mp4" -o highlights.mp4
-
-# Check queue status
-curl http://localhost:3001/api/auto-edit/status
 
 # Trim (no Ollama needed)
 curl -X POST "http://localhost:3001/api/trim?in=5&out=15" \
   --data-binary @input.mp4 -H "Content-Type: video/mp4" -o trimmed.mp4
 ```
 
+## Configuration
+
+All optional. `npm run dev` works without any `.env` file.
+
+```bash
+# apps/api/.env
+
+OLLAMA_URL=http://localhost:11434/v1/chat/completions
+VISION_MODEL=qwen3-vl:8b-thinking
+TEXT_MODEL=qwen3-vl:8b-thinking
+AUTH_SECRET=your-secret
+PORT=3001
+CORS_ORIGIN=http://localhost:5173
+STYLE_DB_PATH=data/styles.db
+
+WEBCHAT_ENABLED=true
+WEBCHAT_PORT=3980
+
+TELEGRAM_BOT_TOKEN=...
+DISCORD_BOT_TOKEN=...
+SLACK_BOT_TOKEN=...
+SLACK_APP_TOKEN=...
+```
+
 ## Tech Stack
 
 | Layer | Tech |
 |---|---|
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Lucide icons |
-| AI | Multi-agent pipeline (7 agents), Ollama (Qwen3 VL), Adaptive Style Engine, RAG knowledge base |
-| AI (Python) | faster-whisper (GPU), Qwen3 VL via Ollama, ffmpeg scene detection |
-| Backend | Express.js, ffmpeg/ffprobe |
-| Persistence | IndexedDB (client), SQLite (server) |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui |
+| AI | 7-agent pipeline, Ollama (Qwen3 VL), Adaptive Style Engine, RAG |
+| Backend | Express.js, ffmpeg/ffprobe, SQLite |
 
 ## Project Structure
 
 ```
-apps/web/          Frontend (React + Tailwind + shadcn/ui + Ollama)
-apps/api/          Backend (Express + ffmpeg + AI pipeline + Style Engine)
+apps/web/          React + Tailwind + shadcn/ui
+apps/api/          Express + ffmpeg + AI pipeline + Style Engine
 packages/core/     Shared TypeScript types
-data/styles.db     SQLite database — style fingerprints + delivery history (gitignored)
+data/styles.db     SQLite — fingerprints + delivery history (gitignored)
 scripts/
-  video_autopilot.py   Python GPU video editor (RTX 4070 optimized)
-  requirements.txt     Python dependencies
+  video_autopilot.py   Python GPU video editor
   check-deps.js        Dependency health checker
 ```
 
 <details>
-<summary>Messaging Channels (12 platforms)</summary>
+<summary>Processing Queue</summary>
 
-Supports Telegram, Discord, Slack, WhatsApp, Microsoft Teams, Google Chat, Signal, Matrix, iMessage, WebChat, Zalo OA, and Zalo Personal. Set the relevant env vars to enable a channel — unconfigured channels are skipped (bot stays idle).
+Auto-edit requests are processed sequentially (single GPU VRAM constraint). `/api/auto-edit` queues in-memory (FIFO). Check with `GET /api/auto-edit/status`.
+</details>
+
+<details>
+<summary>Python Video Autopilot (GPU)</summary>
+
+Standalone script for GPU-accelerated editing, optimized for NVIDIA RTX 4070 (12GB VRAM). Handles 5s to 10h videos.
 
 ```bash
-npm run dev:bot   # Start multi-channel bot
+pip install -r scripts/requirements.txt
+python scripts/video_autopilot.py input.mp4
+python scripts/video_autopilot.py input.mp4 -o highlights.mp4 --keep-ratio 0.4
+python scripts/video_autopilot.py input.mp4 --plan-only > edit_plan.json
 ```
+
+**Pipeline:** PROBE → AUDIO (faster-whisper GPU) → VISION (Ollama qwen3-vl) → MERGE (consensus filter) → ASSEMBLE (ffmpeg).
+
+Consensus: segment approved when audio RMS > threshold + speech detected + Qwen confidence > 0.8. Dynamic frame sampling adapts to video length. Checkpoints every 50 frames.
+
+EditPlan output is compatible with `/api/render`:
+```bash
+python scripts/video_autopilot.py input.mp4 --plan-only > plan.json
+curl -X POST http://localhost:3001/api/render \
+  -F "video=@input.mp4" -F "editPlan=$(cat plan.json)" -o output.mp4
+```
+</details>
+
+<details>
+<summary>Messaging Channels (12 platforms)</summary>
+
+Telegram, Discord, Slack, WhatsApp, Microsoft Teams, Google Chat, Signal, Matrix, iMessage, WebChat, Zalo OA, Zalo Personal. Set env vars to enable — unconfigured channels are skipped.
 
 See `apps/api/src/channels/` for adapters and required env vars.
 </details>
@@ -268,7 +193,10 @@ Tools: `probe_video`, `extract_frames`, `analyze_scene`, `search_knowledge`, `ca
 ## Testing
 
 ```bash
-npm test
+npm test          # API unit tests (38 tests)
+npm run test:e2e  # Playwright E2E tests
+npm run typecheck # TypeScript
+npm run lint      # ESLint
 ```
 
 ## License
