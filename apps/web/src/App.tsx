@@ -320,7 +320,20 @@ export default function App() {
 
   const togglePlay = () => {
     if (!videoRef.current) return;
-    if (playing) { videoRef.current.pause(); } else { videoRef.current.play(); }
+    if (playing) {
+      videoRef.current.pause();
+    } else {
+      // If we have segments and current time is before the first segment or past
+      // all segments, jump to the first segment's start for preview playback.
+      if (segments.length >= 2) {
+        const t = videoRef.current.currentTime;
+        const lastSeg = segments[segments.length - 1];
+        if (t < segments[0].src_in - 0.1 || t > lastSeg.src_out + 0.1) {
+          videoRef.current.currentTime = segments[0].src_in;
+        }
+      }
+      videoRef.current.play();
+    }
     setPlaying(!playing);
   };
 
@@ -346,6 +359,32 @@ export default function App() {
     videoRef.current.currentTime = seg.src_in;
     setCurrentTime(seg.src_in);
   };
+
+  // Segment-aware playback: skip gaps between highlight segments so the
+  // preview behaves like the rendered highlight reel.
+  const handleTimeUpdate = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = v.currentTime;
+    setCurrentTime(t);
+
+    // Only enforce segment boundaries when an EditPlan with multiple segments exists
+    if (segments.length < 2) return;
+
+    // Find which segment (if any) contains the current time
+    const inSegment = segments.some(s => t >= s.src_in - 0.05 && t <= s.src_out + 0.05);
+    if (inSegment) return;
+
+    // Current time is in a gap — find the next segment after current time
+    const nextSeg = segments.find(s => s.src_in > t + 0.05);
+    if (nextSeg) {
+      v.currentTime = nextSeg.src_in;
+    } else {
+      // Past all segments — stop playback
+      v.pause();
+      setPlaying(false);
+    }
+  }, [segments]);
 
   const removeSegment = (segId: string) => {
     if (!state.editPlan) return;
@@ -393,6 +432,10 @@ export default function App() {
       saveToDB(next).catch(console.error);
       return next;
     });
+
+    if (!ollamaConnected) {
+      setAgentProgress(prev => [...prev, "[SYSTEM] Ollama not connected — edits will use time-based fallback, not AI video analysis"]);
+    }
 
     // ── Helper: send messages to Ollama via API proxy (auth-protected) ──────
     const ollamaChat = async (messages: { role: string; content: any }[]): Promise<string> => {
@@ -561,6 +604,7 @@ VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
       } catch (e) {
         console.warn("[CUT] AI failed, using fallback:", e);
         cutSegments = buildFallback(duration).segments;
+        setAgentProgress(prev => [...prev, `[CUT] Ollama unavailable — using time-based fallback (not based on video content)`]);
       }
       setAgentProgress(prev => [...prev, `[CUT] Selected ${cutSegments.length} segments`]);
 
@@ -881,7 +925,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                 ref={videoRef}
                 src={activeClip.url}
                 onLoadedMetadata={handleVideoLoad}
-                onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+                onTimeUpdate={handleTimeUpdate}
                 onEnded={() => setPlaying(false)}
                 onClick={togglePlay}
                 className="w-full h-full object-contain"

@@ -92,7 +92,32 @@ async function llmRequest(systemPrompt, userContent, options = {}) {
   }, { maxRetries: 2, label: "OLLAMA" });
 }
 
+// ---------------------------------------------------------------------------
+// Health check — fast connectivity probe (no GPU/model load)
+// ---------------------------------------------------------------------------
+
+const OLLAMA_URL_BASE = process.env.OLLAMA_URL
+  ? process.env.OLLAMA_URL.replace(/\/v1\/chat\/completions$/, "")
+  : "http://localhost:11434";
+
+/**
+ * Check if Ollama is reachable. Returns true/false without throwing.
+ * Uses the /api/tags endpoint which is lightweight (no model loading).
+ */
+async function isOllamaAvailable() {
+  try {
+    const res = await undiciFetch(`${OLLAMA_URL_BASE}/api/tags`, {
+      method: "GET",
+      signal: AbortSignal.timeout(3000), // 3s — just a connectivity check
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   llmRequest,
   withRetry,
+  isOllamaAvailable,
 };
