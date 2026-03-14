@@ -50,6 +50,16 @@ const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: "10mb" }));
 
+// Accept video MIME types and application/octet-stream (common for raw uploads)
+const VIDEO_CONTENT_TYPES = /^(video\/|application\/octet-stream)/;
+function validateVideoContentType(req, res) {
+  const ct = req.headers["content-type"] || "";
+  if (ct && !VIDEO_CONTENT_TYPES.test(ct)) {
+    res.status(415).json({ error: `Unsupported content type: ${ct}. Expected video/* or application/octet-stream` });
+    return false;
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // In-memory FIFO queue for AI-heavy endpoints (VRAM can only handle one at a time)
