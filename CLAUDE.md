@@ -94,6 +94,30 @@ MOCK_OLLAMA=1 npm run test:e2e
 
 E2E tests are part of the standard verification flow. Run them alongside unit tests before pushing.
 
+## Architecture Conventions
+
+### Body Parsing Convention
+
+The API uses three body parsing strategies, each for a specific use case:
+
+| Strategy | When to use | Endpoints |
+|----------|------------|-----------|
+| `express.json()` | JSON-only payloads (metadata, frames as base64) | `/api/analyze`, `/api/approve-delivery`, `/api/ollama/chat` |
+| `express.raw({ type: "*/*", limit: "2gb" })` | Single video binary with metadata in query params | `/api/trim`, `/api/auto-edit`, `/api/render`, `/api/overlay`, `/api/adjust-audio` |
+| `multer.array()` | Multiple file uploads | `/api/merge` |
+
+**Rule:** For endpoints that accept raw video, pass structured data via **query params** (preferred) or `X-*` headers (legacy). Never put JSON in the body alongside raw binary.
+
+### Progress Event Convention
+
+All progress events use the standardized shape `{ type, agent, message, timestamp }` across NDJSON, SSE, and WebSocket transports.
+
+### Shared Modules
+
+- `apps/api/src/shared/media-utils.js` — ffmpeg/ffprobe wrappers, temp file helpers, WSL path conversion
+- `apps/api/src/shared/auto-edit-pipeline.js` — core auto-edit processing (used by both HTTP routes and bot channels directly)
+- `packages/core/index.ts` — shared TypeScript types (imported by `apps/web`)
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:

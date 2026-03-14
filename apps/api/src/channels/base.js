@@ -11,14 +11,8 @@
  */
 
 const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
-const { execFile } = require("child_process");
-const http = require("http");
-
-const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
-const API_URL = process.env.API_URL || "http://localhost:3001";
+const { tmpFile, cleanup, compressVideo } = require("../shared/media-utils");
+const { processAutoEdit } = require("../shared/auto-edit-pipeline");
 
 // ── Shared HTTP helper — fetch with timeout ─────────────────────────────────
 
@@ -30,87 +24,11 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 2 * 60 * 1000) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
 }
 
-// ── Shared helpers ──────────────────────────────────────────────────────────
-
-function toWslPath(p) {
-  if (process.platform === "win32") {
-    return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
-  }
-  return p;
-}
-
-function tmpFile(ext) {
-  return path.join(os.tmpdir(), `ch_${crypto.randomBytes(6).toString("hex")}.${ext}`);
-}
-
-function cleanup(...files) {
-  for (const f of files) try { fs.unlinkSync(f); } catch {}
-}
-
-function ffmpegExec(args) {
-  return new Promise((resolve, reject) => {
-    const [cmd, fullArgs] = process.platform === "win32"
-      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffmpeg", ...args]]
-      : ["ffmpeg", args];
-    execFile(cmd, fullArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout);
-    });
-  });
-}
-
-function ffprobeExec(args) {
-  return new Promise((resolve, reject) => {
-    const [cmd, fullArgs] = process.platform === "win32"
-      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffprobe", ...args]]
-      : ["ffprobe", args];
-    execFile(cmd, fullArgs, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
-    });
-  });
-}
-
-/**
- * Compress video to fit within maxBytes.
- * Preserves original resolution, aspect ratio, rotation, frame rate.
- */
-async function compressVideo(inputPath, outputPath, maxBytes) {
-  const wslIn = toWslPath(inputPath);
-  const wslOut = toWslPath(outputPath);
-
-  const durationStr = await ffprobeExec(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
-  const duration = parseFloat(durationStr);
-  if (!duration || duration <= 0) {
-    throw new Error("Could not determine video duration for compression");
-  }
-
-  const targetBytes = maxBytes * 0.95;
-  const audioBitrate = 128 * 1024;
-  const totalBitrate = (targetBytes * 8) / duration;
-  const videoBitrate = Math.floor(totalBitrate - audioBitrate);
-
-  if (videoBitrate < 100 * 1024) {
-    throw new Error("Video too long to compress under size limit with acceptable quality");
-  }
-
-  const vbr = Math.floor(videoBitrate / 1000) + "k";
-  const bufsize = Math.floor((videoBitrate * 2) / 1000) + "k";
-  console.log(`[COMPRESS] duration=${duration.toFixed(1)}s, target=${(targetBytes / 1024 / 1024).toFixed(1)}MB, vbr=${vbr}`);
-
-  await ffmpegExec(["-y", "-i", wslIn, "-c:v", "libx264", "-b:v", vbr, "-maxrate", vbr, "-bufsize", bufsize, "-c:a", "aac", "-b:a", "128k", "-preset", "medium", "-map_metadata", "0", "-movflags", "+faststart", wslOut]);
-
-  const outSize = fs.statSync(outputPath).size;
-  if (outSize > maxBytes) {
-    const ratio = targetBytes / outSize;
-    const adjustedVbr = Math.floor((videoBitrate * ratio) / 1000) + "k";
-    const adjustedBuf = Math.floor((videoBitrate * ratio * 2) / 1000) + "k";
-    await ffmpegExec(["-y", "-i", wslIn, "-c:v", "libx264", "-b:v", adjustedVbr, "-maxrate", adjustedVbr, "-bufsize", adjustedBuf, "-c:a", "aac", "-b:a", "128k", "-preset", "medium", "-map_metadata", "0", "-movflags", "+faststart", wslOut]);
-  }
-}
-
 /**
  * Core video processing — shared by all channels.
+ *
+ * Calls the auto-edit pipeline directly (no HTTP loopback) since the bot
+ * runs in the same process as the API server.
  *
  * @param {string}   inputPath    - Local path to downloaded video
  * @param {string}   videoName    - Original filename (without extension)
@@ -120,7 +38,6 @@ async function compressVideo(inputPath, outputPath, maxBytes) {
  * @returns {{ outputPath: string, summary: string, segCount: string, compressed: boolean, width: number, height: number, duration: number }}
  */
 async function processVideo(inputPath, videoName, maxUpload, onProgress, options = {}) {
-  const tmpOut = tmpFile("mp4");
   const tmpCompressed = tmpFile("mp4");
 
   try {
@@ -129,65 +46,40 @@ async function processVideo(inputPath, videoName, maxUpload, onProgress, options
 
     onProgress("Processing with AI... this may take a minute.");
 
-    const videoBuffer = fs.readFileSync(inputPath);
-    // Use Node's built-in http.request with generous timeouts.
-    // The API calls the LLM which can take several minutes on large files.
-    const userIdParam = options.userId ? `&userId=${encodeURIComponent(options.userId)}` : "";
-    console.log(`[PROCESS] Sending to API: ${API_URL}/api/auto-edit (userId=${options.userId || "none"})`);
-    const { statusCode, headers: resHeaders, body: resBody } = await new Promise((resolve, reject) => {
-      const url = new URL(`${API_URL}/api/auto-edit?name=${encodeURIComponent(videoName)}${userIdParam}`);
-      const req = http.request({
-        hostname: url.hostname,
-        port: url.port,
-        path: url.pathname + url.search,
-        method: "POST",
-        headers: { "Content-Type": "video/mp4", "Content-Length": videoBuffer.length },
-        timeout: 15 * 60 * 1000,
-      }, (res) => {
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => {
-          resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
-        });
-        res.on("error", reject);
-      });
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(new Error("API request timed out (15 min)")); });
-      req.write(videoBuffer);
-      req.end();
-    });
-    console.log(`[PROCESS] API responded: ${statusCode}, body=${(resBody.length / 1024 / 1024).toFixed(1)}MB`);
+    // Direct function call — no HTTP loopback needed since bot runs in-process
+    const result = await processAutoEdit(inputPath, { name: videoName, userId: options.userId || null });
+    const { metadata } = result;
 
-    if (statusCode < 200 || statusCode >= 300) {
-      throw new Error(`API error ${statusCode}: ${resBody.toString().slice(0, 500)}`);
-    }
-
-    fs.writeFileSync(tmpOut, resBody);
-
-    const summary = resHeaders["x-ai-summary"] || "";
-    const segCount = resHeaders["x-segments-count"] || "?";
-    const width = parseInt(resHeaders["x-video-width"]) || 0;
-    const height = parseInt(resHeaders["x-video-height"]) || 0;
-    const duration = parseInt(resHeaders["x-video-duration"]) || 0;
-    const styleMode = resHeaders["x-style-mode"] || "discovery";
-    const projectCount = parseInt(resHeaders["x-project-count"]) || 0;
+    const summary = metadata.summary || "";
+    const segCount = String(metadata.segments || "?");
+    const width = metadata.width || 0;
+    const height = metadata.height || 0;
+    const duration = metadata.duration || 0;
+    const styleMode = metadata.styleMode || "discovery";
+    const projectCount = metadata.projectCount || 0;
 
     // Compress if needed
-    let outputPath = tmpOut;
+    let outputPath = result.outputPath;
     let compressed = false;
-    const outSize = fs.statSync(tmpOut).size;
+    const outSize = fs.statSync(result.outputPath).size;
 
     if (maxUpload > 0 && outSize > maxUpload) {
       const outMB = (outSize / (1024 * 1024)).toFixed(1);
       onProgress(`Compressing video (${outMB}MB) to fit upload limit...`);
-      await compressVideo(tmpOut, tmpCompressed, maxUpload);
+      await compressVideo(result.outputPath, tmpCompressed, maxUpload);
+      cleanup(result.outputPath);
       outputPath = tmpCompressed;
       compressed = true;
     }
 
-    return { outputPath, summary, segCount, compressed, width, height, duration, styleMode, projectCount, _tmpOut: tmpOut, _tmpCompressed: tmpCompressed };
+    // Clean up pipeline temp files (but not outputPath which caller uses)
+    for (const f of result._tmpFiles) {
+      try { fs.rmSync(f, { recursive: true }); } catch {}
+    }
+
+    return { outputPath, summary, segCount, compressed, width, height, duration, styleMode, projectCount, _tmpOut: result.outputPath, _tmpCompressed: tmpCompressed };
   } catch (err) {
-    cleanup(tmpOut, tmpCompressed);
+    cleanup(tmpCompressed);
     throw err;
   }
 }
@@ -215,4 +107,4 @@ class BaseChannel {
   async stop() {}
 }
 
-module.exports = { BaseChannel, processVideo, compressVideo, tmpFile, cleanup, toWslPath, API_URL, fetchWithTimeout };
+module.exports = { BaseChannel, processVideo, tmpFile, cleanup, fetchWithTimeout };

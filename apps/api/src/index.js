@@ -1,12 +1,11 @@
 ﻿const express = require("express");
 const cors = require("cors");
-const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
-const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
+const { toWslPath, tmpFile, cleanup, ffmpeg, ffprobe, isVideoFile, compressVideo } = require("./shared/media-utils");
 
 // ---------------------------------------------------------------------------
 // Simple token-based authentication
@@ -46,46 +45,14 @@ function authMiddleware(req, res, next) {
   next();
 }
 
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
 const app = express();
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || "http://localhost:5173",
-  exposedHeaders: ["X-AI-Summary", "X-Segments-Count", "X-Video-Width", "X-Video-Height", "X-Video-Duration"],
-}));
+app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: "10mb" }));
 
-// Accept video MIME types and application/octet-stream (common for raw uploads)
-const VIDEO_CONTENT_TYPES = /^(video\/|application\/octet-stream)/;
-function validateVideoContentType(req, res) {
-  const ct = req.headers["content-type"] || "";
-  if (ct && !VIDEO_CONTENT_TYPES.test(ct)) {
-    res.status(415).json({ error: `Unsupported content type: ${ct}. Expected video/* or application/octet-stream` });
-    return false;
-  }
-  return true;
-}
-
-function toWslPath(p) {
-  if (process.platform === "win32") {
-    return p.replace(/\\/g, "/").replace(/^([A-Z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
-  }
-  return p;
-}
-function tmpFile(ext) {
-  return path.join(os.tmpdir(), `va_${crypto.randomBytes(6).toString("hex")}.${ext}`);
-}
-function cleanup(...files) {
-  for (const f of files) try { fs.unlinkSync(f); } catch {}
-}
-
-const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"]);
-function isVideoFile(filename) {
-  if (!filename) return false;
-  const ext = path.extname(filename).toLowerCase();
-  return VIDEO_EXTENSIONS.has(ext);
-}
 
 // ---------------------------------------------------------------------------
-// In-memory FIFO queue for auto-edit (VRAM can only handle one at a time)
+// In-memory FIFO queue for AI-heavy endpoints (VRAM can only handle one at a time)
 // ---------------------------------------------------------------------------
 const autoEditQueue = [];
 let autoEditRunning = false;
@@ -114,42 +81,6 @@ async function processAutoEditQueue() {
 
 function getQueuePosition() {
   return { queued: autoEditQueue.length, processing: autoEditRunning };
-}
-function ffmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const [cmd, fullArgs] = process.platform === "win32"
-      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffmpeg", ...args]]
-      : ["ffmpeg", args];
-    console.log(`[FFMPEG] ${cmd} ${fullArgs.join(" ")}`);
-    const start = Date.now();
-    execFile(cmd, fullArgs, { maxBuffer: 100 * 1024 * 1024 }, (err, _, stderr) => {
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      if (err) {
-        console.log(`[FFMPEG] FAILED after ${elapsed}s: ${(stderr || err.message).slice(0, 300)}`);
-        reject(new Error(stderr || err.message));
-      } else {
-        console.log(`[FFMPEG] OK in ${elapsed}s`);
-        resolve();
-      }
-    });
-  });
-}
-function ffprobe(args) {
-  return new Promise((resolve, reject) => {
-    const [cmd, fullArgs] = process.platform === "win32"
-      ? ["wsl", ["-d", WSL_DISTRO, "--", "ffprobe", ...args]]
-      : ["ffprobe", args];
-    console.log(`[FFPROBE] ${cmd} ${fullArgs.join(" ")}`);
-    execFile(cmd, fullArgs, (err, stdout, stderr) => {
-      if (err) {
-        console.log(`[FFPROBE] FAILED: ${(stderr || err.message).slice(0, 300)}`);
-        reject(new Error(stderr || err.message));
-      } else {
-        console.log(`[FFPROBE] OK (${stdout.trim().length} chars)`);
-        resolve(stdout.trim());
-      }
-    });
-  });
 }
 
 async function extractFrames(wslIn, duration, count) {
@@ -181,6 +112,9 @@ const { runEditPipeline, setProgressCallback } = require("./ai/agents");
 const { resolveStyle } = require("./ai/style-resolver");
 const { buildFingerprint } = require("./ai/fingerprint-builder");
 const { getOrCreateProfile, loadProfile, deleteProfile, FINGERPRINT_THRESHOLD } = require("./ai/style-store");
+
+// Auto-edit pipeline (shared between HTTP handler and bot channels)
+const autoEditPipeline = require("./shared/auto-edit-pipeline");
 
 /**
  * Probe video dimensions and frame rate via ffprobe.
@@ -578,6 +512,17 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
   }
 }
 
+// Initialize auto-edit pipeline for direct function calls (used by bot channels)
+autoEditPipeline.init({
+  runEditPipeline,
+  renderEditPlan,
+  probeVideoMeta,
+  probeSourceQuality,
+  extractFrames,
+  resolveStyle,
+  enqueueAutoEdit,
+});
+
 //  POST /api/analyze — multi-agent EditPlan (web client)
 //  Streams NDJSON progress events automatically, final line is the result.
 //  Client receives lines like: {"type":"progress","agent":"CUT","message":"..."}
@@ -594,43 +539,52 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
     try { res.write(JSON.stringify(obj) + "\n"); } catch {}
   };
 
-  // Wire pipeline progress directly into the response stream
-  setProgressCallback((agent, message) => {
-    sendLine({ type: "progress", agent, message, ts: Date.now() });
-  });
+  const queuePos = getQueuePosition();
+  if (queuePos.queued > 0) {
+    sendLine({ type: "progress", agent: "SYSTEM", message: `Queued (position ${queuePos.queued + 1})...`, timestamp: Date.now() });
+  }
 
   try {
-    // Adaptive Style Engine (v2): resolve videographer style
-    const styleResult = resolveStyle(userId || null);
-    if (styleResult.profile) {
-      sendLine({ type: "progress", agent: "STYLE", message: styleResult.mode === "guided" ? `Guided mode — using style from ${styleResult.profile.projectCount} approved projects` : `Discovery mode — ${styleResult.remaining} projects until style lock-in`, ts: Date.now() });
-      sendLine({ type: "style", mode: styleResult.mode, projectCount: styleResult.profile.projectCount, threshold: FINGERPRINT_THRESHOLD, ts: Date.now() });
-    }
+    await enqueueAutoEdit(async () => {
+      // Wire pipeline progress directly into the response stream
+      setProgressCallback((agent, message) => {
+        sendLine({ type: "progress", agent, message, timestamp: Date.now() });
+      });
 
-    sendLine({ type: "progress", agent: "SYSTEM", message: "Starting analysis...", ts: Date.now() });
+      try {
+        // Adaptive Style Engine (v2): resolve videographer style
+        const styleResult = resolveStyle(userId || null);
+        if (styleResult.profile) {
+          sendLine({ type: "progress", agent: "STYLE", message: styleResult.mode === "guided" ? `Guided mode — using style from ${styleResult.profile.projectCount} approved projects` : `Discovery mode — ${styleResult.remaining} projects until style lock-in`, timestamp: Date.now() });
+          sendLine({ type: "style", mode: styleResult.mode, projectCount: styleResult.profile.projectCount, threshold: FINGERPRINT_THRESHOLD, timestamp: Date.now() });
+        }
 
-    const frameData = (frames || []).map((f, i) => ({
-      timestamp: Math.round((duration / frames.length) * i * 10) / 10,
-      base64: f
-    }));
-    const videoMeta = { duration, fps: fps || 30, width: width || 0, height: height || 0 };
-    const editPlan = await runEditPipeline(videoMeta, frameData, null, { styleContext: styleResult.styleContext });
+        sendLine({ type: "progress", agent: "SYSTEM", message: "Starting analysis...", timestamp: Date.now() });
 
-    // Final result line
-    sendLine({
-      type: "result",
-      editPlan,
-      segments: editPlan.segments,
-      summary: `${editPlan.segments.length} highlights selected`,
-      styleMode: styleResult.mode,
+        const frameData = (frames || []).map((f, i) => ({
+          timestamp: Math.round((duration / frames.length) * i * 10) / 10,
+          base64: f
+        }));
+        const videoMeta = { duration, fps: fps || 30, width: width || 0, height: height || 0 };
+        const editPlan = await runEditPipeline(videoMeta, frameData, null, { styleContext: styleResult.styleContext });
+
+        // Final result line
+        sendLine({
+          type: "result",
+          editPlan,
+          segments: editPlan.segments,
+          summary: `${editPlan.segments.length} highlights selected`,
+          styleMode: styleResult.mode,
+        });
+        res.end();
+      } finally {
+        setProgressCallback(null);
+      }
     });
-    res.end();
   } catch (err) {
     console.error("[ANALYZE ERROR]", err);
     sendLine({ type: "error", error: "Analysis failed", message: err.message || "Unknown error" });
     res.end();
-  } finally {
-    setProgressCallback(null);
   }
 });
 
@@ -683,88 +637,35 @@ app.get("/api/auto-edit/status", authMiddleware, (req, res) => {
 app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
   if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
-  const name   = req.query.name || "video";
-  const botUserId = req.query.userId || req.headers["x-user-id"] || null;
-  const queuePos = getQueuePosition();
-  if (queuePos.queued > 0) {
-    console.log(`[AUTO-EDIT] Request queued (position ${queuePos.queued + 1})`);
-  }
+  const name = req.query.name || "video";
+  const userId = req.query.userId || req.headers["x-user-id"] || null;
 
+  const tmpIn = tmpFile("mp4");
   try {
-    await enqueueAutoEdit(async () => {
-      const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
-      const tmpDir = path.join(os.tmpdir(), `edit_${crypto.randomBytes(4).toString("hex")}`);
-      fs.mkdirSync(tmpDir);
-      try {
-        fs.writeFileSync(tmpIn, req.body);
-        const inputSize = fs.statSync(tmpIn).size;
-        console.log(`[AUTO-EDIT] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
-        const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    fs.writeFileSync(tmpIn, req.body);
+    const result = await autoEditPipeline.processAutoEdit(tmpIn, { name, userId });
 
-        // Adaptive Style Engine (v2): resolve videographer style
-        const styleResult = resolveStyle(botUserId);
-        if (botUserId) {
-          console.log(`[AUTO-EDIT] Style: user=${botUserId}, mode=${styleResult.mode}, projects=${styleResult.profile?.projectCount || 0}`);
-        }
-
-        // Probe video metadata
-        const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
-        const duration = parseFloat(durationStr);
-        if (isNaN(duration) || duration <= 0) {
-          cleanup(tmpIn, tmpOut);
-          try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-          res.status(400).json({ error: "Could not determine video duration" });
-          return;
-        }
-        // Probe FULL source quality params BEFORE any processing
-        const sourceQuality = await probeSourceQuality(wslIn);
-
-        const videoMeta = await probeVideoMeta(wslIn, duration);
-        console.log(`[AUTO-EDIT] Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`);
-
-        // Extract frames for vision analysis
-        const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
-        console.log(`[AUTO-EDIT] Extracting ${frameCount} frames...`);
-        const frames = await extractFrames(wslIn, duration, frameCount);
-
-        // Run multi-agent pipeline: [Style] → Cut → Structure → Continuity → Transition → Constraints
-        console.log("[AUTO-EDIT] Running multi-agent editing pipeline...");
-        const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn, styleContext: styleResult.styleContext });
-
-        const segments = editPlan.segments || [];
-        const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
-        console.log(`[AUTO-EDIT] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s of ${duration.toFixed(1)}s (${(finalDuration / duration * 100).toFixed(0)}%)`);
-
-        // Render the EditPlan to video using source-matched quality
-        console.log(`[AUTO-EDIT] Rendering ${segments.length} segments...`);
-        const renderStart = Date.now();
-        await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
-        const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
-        const outputSize = fs.statSync(tmpOut).size;
-        console.log(`[AUTO-EDIT] Render done in ${renderElapsed}s`);
-        console.log(`[AUTO-EDIT] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB, ratio: ${(outputSize / inputSize * 100).toFixed(0)}%)`);
-
-        const summary = `${segments.length} highlights selected`;
-        res.set("Content-Type", "video/mp4");
-        res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
-        res.set("X-AI-Summary", summary);
-        res.set("X-Segments-Count", String(segments.length));
-        res.set("X-Video-Width", String(videoMeta.width));
-        res.set("X-Video-Height", String(videoMeta.height));
-        res.set("X-Video-Duration", String(Math.round(finalDuration)));
-        res.set("X-Style-Mode", styleResult.mode);
-        res.set("X-Project-Count", String(styleResult.profile?.projectCount || 0));
-        res.sendFile(tmpOut, (err) => {
-          if (err) console.error("[AUTO-EDIT] sendFile error:", err.message);
-          cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-        });
-      } catch (err) {
-        cleanup(tmpIn, tmpOut);
-        try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-        throw err;
+    const { metadata } = result;
+    res.set("Content-Type", "video/mp4");
+    res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
+    res.set("X-Metadata", JSON.stringify(metadata));
+    // Individual headers kept for backward compatibility
+    res.set("X-AI-Summary", metadata.summary);
+    res.set("X-Segments-Count", String(metadata.segments));
+    res.set("X-Video-Width", String(metadata.width));
+    res.set("X-Video-Height", String(metadata.height));
+    res.set("X-Video-Duration", String(metadata.duration));
+    res.set("X-Style-Mode", metadata.styleMode);
+    res.set("X-Project-Count", String(metadata.projectCount));
+    res.sendFile(result.outputPath, (err) => {
+      if (err) console.error("[AUTO-EDIT] sendFile error:", err.message);
+      cleanup(result.outputPath, ...result._tmpFiles);
+      for (const f of result._tmpFiles) {
+        try { fs.rmSync(f, { recursive: true }); } catch {}
       }
     });
   } catch (err) {
+    cleanup(tmpIn);
     if (!res.headersSent) {
       console.error("[AUTO-EDIT ERROR]", err);
       res.status(500).json({ error: "Auto-edit failed" });
@@ -780,14 +681,14 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
 
-  // EditPlan is passed as a header to avoid multipart complexity
-  const editPlanHeader = req.headers["x-edit-plan"];
-  if (!editPlanHeader) return res.status(400).json({ error: "Missing X-Edit-Plan header" });
+  // EditPlan: accept via query param (preferred) or X-Edit-Plan header (legacy)
+  const editPlanRaw = req.query.editPlan || req.headers["x-edit-plan"];
+  if (!editPlanRaw) return res.status(400).json({ error: "Missing editPlan query param or X-Edit-Plan header" });
   let editPlan;
   try {
-    editPlan = JSON.parse(editPlanHeader);
+    editPlan = JSON.parse(editPlanRaw);
   } catch {
-    return res.status(400).json({ error: "Invalid X-Edit-Plan JSON" });
+    return res.status(400).json({ error: "Invalid editPlan JSON" });
   }
   const segments = editPlan.segments || [];
   if (!segments.length) return res.status(400).json({ error: "EditPlan has no segments" });
@@ -847,22 +748,21 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
   if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
-  // Set up SSE headers
+  // Set up SSE headers (CORS is handled by the cors() middleware)
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
-    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "http://localhost:5173",
   });
 
   const sendEvent = (event, data) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  // Set up progress callback for the pipeline
-  setProgressCallback((agent, message) => {
-    sendEvent("progress", { agent, message, timestamp: Date.now() });
-  });
+  const queuePos = getQueuePosition();
+  if (queuePos.queued > 0) {
+    sendEvent("progress", { agent: "SYSTEM", message: `Queued (position ${queuePos.queued + 1})...`, timestamp: Date.now() });
+  }
 
   const name = req.query.name || "video";
   const tmpIn = tmpFile("mp4"), tmpOut = tmpFile("mp4");
@@ -870,57 +770,104 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
   fs.mkdirSync(tmpDir);
 
   try {
-    fs.writeFileSync(tmpIn, req.body);
-    const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
+    await enqueueAutoEdit(async () => {
+      // Set up progress callback for the pipeline
+      setProgressCallback((agent, message) => {
+        sendEvent("progress", { agent, message, timestamp: Date.now() });
+      });
 
-    sendEvent("progress", { agent: "SYSTEM", message: "Video received, probing metadata...", timestamp: Date.now() });
+      try {
+        fs.writeFileSync(tmpIn, req.body);
+        const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
-    const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
-    const duration = parseFloat(durationStr);
-    if (isNaN(duration) || duration <= 0) {
-      sendEvent("error", { error: "Invalid video", message: "Could not determine video duration" });
-      res.end();
-      cleanup(tmpIn, tmpOut);
-      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-      return;
-    }
+        sendEvent("progress", { agent: "SYSTEM", message: "Video received, probing metadata...", timestamp: Date.now() });
 
-    const sourceQuality = await probeSourceQuality(wslIn);
-    const videoMeta = await probeVideoMeta(wslIn, duration);
+        const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
+        const duration = parseFloat(durationStr);
+        if (isNaN(duration) || duration <= 0) {
+          sendEvent("error", { message: "Could not determine video duration" });
+          res.end();
+          return;
+        }
 
-    sendEvent("progress", { agent: "SYSTEM", message: `Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`, timestamp: Date.now() });
+        const sourceQuality = await probeSourceQuality(wslIn);
+        const videoMeta = await probeVideoMeta(wslIn, duration);
 
-    const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
-    sendEvent("progress", { agent: "SYSTEM", message: `Extracting ${frameCount} frames...`, timestamp: Date.now() });
-    const frames = await extractFrames(wslIn, duration, frameCount);
+        sendEvent("progress", { agent: "SYSTEM", message: `Video: ${videoMeta.width}x${videoMeta.height}, ${videoMeta.fps}fps, ${duration.toFixed(1)}s`, timestamp: Date.now() });
 
-    sendEvent("progress", { agent: "PIPELINE", message: "Starting multi-agent editing pipeline...", timestamp: Date.now() });
-    const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
+        const frameCount = Math.min(24, Math.max(6, Math.floor(duration / 5)));
+        sendEvent("progress", { agent: "SYSTEM", message: `Extracting ${frameCount} frames...`, timestamp: Date.now() });
+        const frames = await extractFrames(wslIn, duration, frameCount);
 
-    const segments = editPlan.segments || [];
-    const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
+        sendEvent("progress", { agent: "PIPELINE", message: "Starting multi-agent editing pipeline...", timestamp: Date.now() });
+        const editPlan = await runEditPipeline(videoMeta, frames, sourceQuality, { videoPath: wslIn });
 
-    sendEvent("progress", { agent: "RENDER", message: `Rendering ${segments.length} segments...`, timestamp: Date.now() });
-    await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+        const segments = editPlan.segments || [];
+        const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
 
-    sendEvent("complete", {
-      segments: segments.length,
-      duration: Math.round(finalDuration),
-      summary: `${segments.length} highlights selected`,
-      width: videoMeta.width,
-      height: videoMeta.height,
+        sendEvent("progress", { agent: "RENDER", message: `Rendering ${segments.length} segments...`, timestamp: Date.now() });
+        await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
+
+        // Read the rendered video and send as base64 in the complete event
+        // so the client can download it directly without a separate request.
+        const videoBase64 = fs.readFileSync(tmpOut).toString("base64");
+
+        sendEvent("complete", {
+          segments: segments.length,
+          duration: Math.round(finalDuration),
+          summary: `${segments.length} highlights selected`,
+          width: videoMeta.width,
+          height: videoMeta.height,
+          videoBase64,
+          filename: `${name}_highlights.mp4`,
+        });
+
+        res.end();
+      } finally {
+        setProgressCallback(null);
+      }
     });
-
-    res.end();
-    // Note: client must fetch the video via a separate request
-    // The output video path is available for download
   } catch (err) {
     sendEvent("error", { error: "Auto-edit failed", message: err.message || "Unknown error" });
     res.end();
   } finally {
-    setProgressCallback(null); // Clear callback
     cleanup(tmpIn, tmpOut);
     try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ollama proxy — routes LLM calls through the API so auth is enforced
+// and the web app doesn't need direct access to Ollama.
+// ---------------------------------------------------------------------------
+const OLLAMA_URL_BASE = process.env.OLLAMA_URL
+  ? process.env.OLLAMA_URL.replace(/\/v1\/chat\/completions$/, "")
+  : "http://localhost:11434";
+const { fetch: undiciFetch } = require("undici");
+
+app.get("/api/ollama/tags", authMiddleware, async (_req, res) => {
+  try {
+    const resp = await undiciFetch(`${OLLAMA_URL_BASE}/api/tags`);
+    if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: "Ollama unreachable", message: err.message });
+  }
+});
+
+app.post("/api/ollama/chat", authMiddleware, async (req, res) => {
+  try {
+    const resp = await undiciFetch(`${OLLAMA_URL_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+    });
+    if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: "Ollama unreachable", message: err.message });
   }
 });
 
@@ -1038,14 +985,15 @@ app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb"
   if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
-  const overlaysHeader = req.headers["x-overlays"];
-  if (!overlaysHeader) return res.status(400).json({ error: "Missing X-Overlays header" });
+  // Overlays: accept via query param (preferred) or X-Overlays header (legacy)
+  const overlaysRaw = req.query.overlays || req.headers["x-overlays"];
+  if (!overlaysRaw) return res.status(400).json({ error: "Missing overlays query param or X-Overlays header" });
   let overlays;
   try {
-    overlays = JSON.parse(overlaysHeader);
+    overlays = JSON.parse(overlaysRaw);
     if (!Array.isArray(overlays) || overlays.length === 0) throw new Error("empty");
   } catch {
-    return res.status(400).json({ error: "Invalid X-Overlays JSON" });
+    return res.status(400).json({ error: "Invalid overlays JSON" });
   }
 
   const name = req.query.name || "video";

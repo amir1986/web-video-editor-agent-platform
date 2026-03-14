@@ -31,8 +31,6 @@ import {
 } from "lucide-react";
 preloadFFmpeg().catch(console.error);
 
-const OLLAMA_BASE = "http://localhost:11434";
-
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"];
 
 function isVideoFile(file: File): boolean {
@@ -42,26 +40,12 @@ function isVideoFile(file: File): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Types — imported from the shared core package (single source of truth)
+// Types — imported from packages/core (single source of truth)
 // ---------------------------------------------------------------------------
 
-import type { Clip, Segment, Transition, EditPlan, TextOverlay as CoreTextOverlay } from "core";
-type TextOverlay = CoreTextOverlay & { from: number; to: number; };
-interface ProjectState {
-  clips: Clip[];
-  inOut: { in: number; out: number };
-  titles: string[];
-  exports: string[];
-  editPlan?: EditPlan;
-  overlays?: TextOverlay[];
-  volume?: number;
-  savedAgentSummary?: string | null;
-  savedActiveTab?: Tab;
-  wasAnalyzing?: boolean;
-}
-const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [], overlays: [], volume: 100 };
+import type { Clip, Segment, Transition, EditPlan, TextOverlay, ProjectState, Tab } from "core";
 
-type Tab = "ai" | "overlays" | "audio";
+const defaultState: ProjectState = { clips: [], inOut: { in: 0, out: 0 }, titles: [], exports: [], overlays: [], volume: 100 };
 
 const AI_STEPS = ["STYLE", "CUT", "STRUCTURE", "CONTINUITY", "TRANSITION", "CONSTRAINTS", "QUALITY_GUARD"] as const;
 type AIStep = typeof AI_STEPS[number];
@@ -191,7 +175,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch(`${OLLAMA_BASE}/api/tags`);
+        const resp = await fetch(`${API_BASE}/api/ollama/tags`);
         if (!resp.ok) throw new Error(`Ollama unreachable: ${resp.status}`);
         const data = await resp.json();
         const models = (data.models || []).map((m: any) => ({
@@ -410,9 +394,9 @@ export default function App() {
       return next;
     });
 
-    // ── Helper: send messages to local Ollama and return the full text ──────
+    // ── Helper: send messages to Ollama via API proxy (auth-protected) ──────
     const ollamaChat = async (messages: { role: string; content: any }[]): Promise<string> => {
-      const resp = await fetch(`${OLLAMA_BASE}/v1/chat/completions`, {
+      const resp = await fetch(`${API_BASE}/api/ollama/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: selectedModel, messages, stream: false }),

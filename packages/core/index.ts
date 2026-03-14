@@ -1,142 +1,116 @@
 // ---------------------------------------------------------------------------
-// Shared types — single source of truth for web, API, and bot packages
+// Shared types — single source of truth for the entire monorepo.
+// Used by: apps/web (TypeScript), apps/api (JSDoc references)
 // ---------------------------------------------------------------------------
 
-// ── Video clip ──────────────────────────────────────────────────────────────
+// ── Video Clips ─────────────────────────────────────────────────────────────
 
 export interface Clip {
   id: string;
   name: string;
-  url?: string;      // web: object URL
-  path?: string;     // api/bot: filesystem path
-  duration: number;  // seconds
+  duration: number; // in seconds
+  /** File URL (web: blob URL) or file path (server: filesystem path) */
+  url: string;
 }
 
-// ── Edit plan types ─────────────────────────────────────────────────────────
-
-export interface Segment {
-  id: string;
-  src_in: number;   // seconds
-  src_out: number;  // seconds
-  needs_soft_transition?: boolean;
-}
-
-export interface Transition {
-  from: string;
-  to: string;
-  type: string;     // "hard_cut" | "fade" | "dissolve" | "dip_to_black"
-}
-
-export interface RenderConstraints {
-  keep_resolution?: boolean;
-  keep_aspect_ratio?: boolean;
-  no_stretch?: boolean;
-  target_width?: number;
-  target_height?: number;
-  codec?: string;
-  preset?: string;
-  pixel_format?: string;
-  fps?: number;
-  fps_mode?: string;
-}
-
-export interface QualityGuard {
-  constraints_ok: boolean;
-  checks: Record<string, boolean>;
-  required_fixes: string[];
-}
-
-export interface EditPlan {
-  segments: Segment[];
-  transitions?: Transition[];
-  render_constraints?: RenderConstraints;
-  notes?: Record<string, unknown>;
-  quality_guard?: QualityGuard;
-}
-
-// ── In/out markers ──────────────────────────────────────────────────────────
+// ── In/Out Markers ──────────────────────────────────────────────────────────
 
 export interface InOut {
   in: number;   // seconds
   out: number;  // seconds
 }
 
-// ── Text overlay ────────────────────────────────────────────────────────────
+// ── Edit Plan Types ─────────────────────────────────────────────────────────
+
+export interface Segment {
+  id: string;
+  src_in: number;
+  src_out: number;
+}
+
+export interface Transition {
+  from: string;
+  to: string;
+  type: string;
+}
+
+export interface EditPlan {
+  segments: Segment[];
+  transitions?: Transition[];
+  render_constraints?: Record<string, unknown>;
+  notes?: Record<string, unknown>;
+  quality_guard?: {
+    constraints_ok: boolean;
+    checks: Record<string, boolean>;
+    required_fixes: string[];
+  };
+}
+
+// ── Text Overlays ───────────────────────────────────────────────────────────
 
 export interface TextOverlay {
   id: string;
   text: string;
-  x: number;        // 0-100 percentage
-  y: number;        // 0-100 percentage
+  x: number;
+  y: number;
   fontSize: number;
-  color: string;     // hex color
-  from?: number;     // seconds
-  to?: number;       // seconds
+  color: string;
+  from: number;
+  to: number;
 }
 
-// ── Export ───────────────────────────────────────────────────────────────────
+// ── Exports ─────────────────────────────────────────────────────────────────
 
 export interface Export {
   id: string;
   status: "pending" | "in-progress" | "completed" | "failed";
   outputPath: string;
-  duration: number;  // seconds
+  duration: number; // in seconds
 }
 
-// ── Project state ───────────────────────────────────────────────────────────
+// ── Project State ───────────────────────────────────────────────────────────
+
+export type Tab = "ai" | "overlays" | "audio";
 
 export interface ProjectState {
   clips: Clip[];
   inOut: InOut;
+  titles: string[];
+  exports: string[];
   editPlan?: EditPlan;
-  titles: Title[];
-  exports: Export[];
+  overlays?: TextOverlay[];
+  volume?: number;
+  savedAgentSummary?: string | null;
+  savedActiveTab?: Tab;
   wasAnalyzing?: boolean;
 }
 
-export interface Title {
-  id: string;
-  text: string;
-  position: { x: number; y: number };
-  fontSize: number;
+// ── Video Metadata ──────────────────────────────────────────────────────────
+
+export interface VideoMeta {
+  duration: number;
+  fps: number;
+  width: number;
+  height: number;
 }
 
-// ── API response types ──────────────────────────────────────────────────────
+// ── Auto-edit response metadata ─────────────────────────────────────────────
 
-/** Unified API error response shape */
-export interface ApiError {
-  error: string;
-  message?: string;
-}
-
-/** Video metadata returned alongside video binary responses */
-export interface VideoMetadata {
+export interface AutoEditMetadata {
   summary: string;
-  segmentsCount: number;
+  segments: number;
   width: number;
   height: number;
   duration: number;
+  styleMode: string;
+  projectCount: number;
 }
 
-/** NDJSON progress event from /api/analyze */
+// ── Progress event (standardized across NDJSON, SSE, WebSocket) ─────────────
+
 export interface ProgressEvent {
-  type: "progress";
-  agent: string;
-  message: string;
-  ts: number;
-}
-
-/** NDJSON result event from /api/analyze */
-export interface AnalyzeResult {
-  type: "result";
-  editPlan: EditPlan;
-  segments: Segment[];
-  summary: string;
-}
-
-/** NDJSON error event */
-export interface ErrorEvent {
-  type: "error";
-  error: string;
-  message: string;
+  type: "progress" | "result" | "error" | "style" | "complete";
+  agent?: string;
+  message?: string;
+  timestamp: number;
 }
