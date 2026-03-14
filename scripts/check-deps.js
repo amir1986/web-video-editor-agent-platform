@@ -186,15 +186,11 @@ function main() {
   // 3. npm audit (optional)
   if (runAudit) {
     console.log('Running npm audit...');
-    try {
-      const auditRaw = execSync('npm audit --json', {
-        maxBuffer: 10 * 1024 * 1024,
-        encoding: 'utf-8',
-        stdio: ['inherit', 'pipe', 'pipe'],
-      });
+    const processAudit = (auditRaw) => {
       const audit = JSON.parse(auditRaw);
       const vulns = audit.vulnerabilities || {};
       for (const [name, info] of Object.entries(vulns)) {
+        console.log(`  [audit] ${name}@${info.version || '?'}: ${info.severity}`);
         if (info.severity === 'critical' || info.severity === 'high') {
           issues.push({
             severity: `VULN-${info.severity.toUpperCase()}`,
@@ -204,22 +200,17 @@ function main() {
           });
         }
       }
+    };
+    try {
+      const auditRaw = execSync('npm audit --json', {
+        maxBuffer: 10 * 1024 * 1024,
+        encoding: 'utf-8',
+        stdio: ['inherit', 'pipe', 'pipe'],
+      });
+      processAudit(auditRaw);
     } catch (e) {
       if (e.stdout) {
-        try {
-          const audit = JSON.parse(e.stdout);
-          const vulns = audit.vulnerabilities || {};
-          for (const [name, info] of Object.entries(vulns)) {
-            if (info.severity === 'critical' || info.severity === 'high') {
-              issues.push({
-                severity: `VULN-${info.severity.toUpperCase()}`,
-                pkg: name,
-                reason: info.via?.map(v => typeof v === 'string' ? v : v.title).join('; ') || 'See npm audit',
-                location: info.fixAvailable ? `Fix available` : 'No automatic fix',
-              });
-            }
-          }
-        } catch { /* ignore parse errors */ }
+        try { processAudit(e.stdout); } catch { /* ignore parse errors */ }
       }
     }
   }
@@ -253,6 +244,17 @@ function main() {
       errors.push(issue);
     }
   }
+
+  // ─── Debug: environment info for CI troubleshooting ─────────────────────
+  console.log(`\n[env] node ${process.version}, npm ${execSync('npm --version', { encoding: 'utf-8' }).trim()}`);
+  try {
+    const undiciVer = execSync('npm ls undici --depth=0 --json', {
+      encoding: 'utf-8', stdio: ['inherit', 'pipe', 'pipe'],
+    });
+    const ut = JSON.parse(undiciVer);
+    const apiDeps = ut.dependencies?.api?.dependencies || {};
+    console.log(`[env] undici resolved: ${apiDeps.undici?.version || 'hoisted'}`);
+  } catch { /* best-effort */ }
 
   // ─── Report ──────────────────────────────────────────────────────────────
   console.log('\n=== Results ===\n');

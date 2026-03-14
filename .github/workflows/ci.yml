@@ -78,7 +78,11 @@ jobs:
         run: npm ci
 
       - name: Check for deprecated packages
-        run: npm run check-deps:full
+        run: |
+          echo "### Dependency Health Check" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          npm run check-deps:full 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
   validate-schemas:
     name: Validate Schemas
