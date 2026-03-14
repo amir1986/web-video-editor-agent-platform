@@ -50,6 +50,7 @@ const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: "10mb" }));
 
+
 // ---------------------------------------------------------------------------
 // In-memory FIFO queue for AI-heavy endpoints (VRAM can only handle one at a time)
 // ---------------------------------------------------------------------------
@@ -582,13 +583,14 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error("[ANALYZE ERROR]", err);
-    sendLine({ type: "error", error: "Analysis failed", message: err.message });
+    sendLine({ type: "error", error: "Analysis failed", message: err.message || "Unknown error" });
     res.end();
   }
 });
 
 //  POST /api/trim 
 app.post("/api/trim", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
@@ -633,6 +635,7 @@ app.get("/api/auto-edit/status", authMiddleware, (req, res) => {
 //  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
 //  Requests are queued and processed sequentially (VRAM constraint).
 app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
   const userId = req.query.userId || req.headers["x-user-id"] || null;
@@ -674,6 +677,7 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
 //  The web client already has the EditPlan from /api/analyze, so this
 //  endpoint skips AI entirely and only does the ffmpeg rendering step.
 app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
 
@@ -741,6 +745,7 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
  * Events: { agent, message, timestamp }
  */
 app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
   // Set up SSE headers (CORS is handled by the cors() middleware)
@@ -823,7 +828,7 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
       }
     });
   } catch (err) {
-    sendEvent("error", { message: err.message });
+    sendEvent("error", { error: "Auto-edit failed", message: err.message || "Unknown error" });
     res.end();
   } finally {
     cleanup(tmpIn, tmpOut);
@@ -977,6 +982,7 @@ app.delete("/api/style-profile/:userId", authMiddleware, (req, res) => {
  *   - from, to: time range in seconds (optional — full video if omitted)
  */
 app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
   // Overlays: accept via query param (preferred) or X-Overlays header (legacy)
@@ -1041,6 +1047,7 @@ app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb"
  * Query: volume (0-200, percentage, default 100)
  */
 app.post("/api/adjust-audio", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const volume = parseFloat(req.query.volume || "100");
   if (isNaN(volume) || volume < 0 || volume > 200) return res.status(400).json({ error: "Volume must be 0-200" });

@@ -14,7 +14,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 25 * 1024 * 1024; // 25MB default (non-boosted)
 
@@ -75,7 +75,7 @@ class DiscordChannel extends BaseChannel {
 
     try {
       // Download attachment
-      const res = await fetch(attachment.url);
+      const res = await fetchWithTimeout(attachment.url);
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);
       const buffer = Buffer.from(await res.arrayBuffer());
       fs.writeFileSync(tmpIn, buffer);

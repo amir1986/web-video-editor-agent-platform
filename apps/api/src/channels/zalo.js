@@ -19,7 +19,7 @@
 
 const fs = require("fs");
 const express = require("express");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 25 * 1024 * 1024;
 const ZALO_API = "https://openapi.zalo.me/v3.0/oa";
@@ -128,7 +128,7 @@ class ZaloChannel extends BaseChannel {
       const url = attachment.payload?.url || attachment.payload?.thumbnail;
       if (!url) throw new Error("No download URL in attachment");
 
-      const dlRes = await fetch(url, { headers: this._headers() });
+      const dlRes = await fetchWithTimeout(url, { headers: this._headers() });
       if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
       const buffer = Buffer.from(await dlRes.arrayBuffer());
       fs.writeFileSync(tmpIn, buffer);

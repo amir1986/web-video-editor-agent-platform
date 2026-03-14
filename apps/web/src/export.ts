@@ -1,4 +1,4 @@
-const DEFAULT_API = "http://localhost:3001";
+import { apiFetch, getApiBase } from "./utils/api-client";
 
 async function fetchVideoBlob(videoUrl: string): Promise<Blob> {
   const res = await fetch(videoUrl);
@@ -14,14 +14,14 @@ export async function exportTrimmed(
   outSec: number,
   filename: string,
   onProgress: (p: number) => void,
-  apiBase: string = DEFAULT_API
+  apiBase: string = getApiBase()
 ): Promise<void> {
   onProgress(10);
   const videoBlob = await fetchVideoBlob(videoUrl);
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
-  const res = await fetch(
+  const res = await apiFetch(
     `${apiBase}/api/trim?in=${inSec}&out=${outSec}&name=${name}`,
     { method: "POST", body: videoBlob, headers: { "Content-Type": "video/mp4" } }
   );
@@ -39,7 +39,7 @@ export async function exportWithEditPlan(
   filename: string,
   onProgress: (p: number) => void,
   editPlan: object,
-  apiBase: string = DEFAULT_API
+  apiBase: string = getApiBase()
 ): Promise<void> {
   onProgress(10);
   const videoBlob = await fetchVideoBlob(videoUrl);
@@ -47,7 +47,7 @@ export async function exportWithEditPlan(
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
   const editPlanParam = encodeURIComponent(JSON.stringify(editPlan));
-  const res = await fetch(
+  const res = await apiFetch(
     `${apiBase}/api/render?name=${name}&editPlan=${editPlanParam}`,
     {
       method: "POST",

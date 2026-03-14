@@ -14,6 +14,16 @@ const fs = require("fs");
 const { tmpFile, cleanup, compressVideo } = require("../shared/media-utils");
 const { processAutoEdit } = require("../shared/auto-edit-pipeline");
 
+// ── Shared HTTP helper — fetch with timeout ─────────────────────────────────
+
+/**
+ * fetch() wrapper with a configurable timeout (default 2 min).
+ * Prevents channel download/upload calls from hanging indefinitely.
+ */
+function fetchWithTimeout(url, options = {}, timeoutMs = 2 * 60 * 1000) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 /**
  * Core video processing — shared by all channels.
  *
@@ -97,4 +107,4 @@ class BaseChannel {
   async stop() {}
 }
 
-module.exports = { BaseChannel, processVideo, tmpFile, cleanup };
+module.exports = { BaseChannel, processVideo, tmpFile, cleanup, fetchWithTimeout };

@@ -16,8 +16,8 @@ export interface Clip {
 // ── In/Out Markers ──────────────────────────────────────────────────────────
 
 export interface InOut {
-  in: number; // in seconds
-  out: number; // in seconds
+  in: number;   // seconds
+  out: number;  // seconds
 }
 
 // ── Edit Plan Types ─────────────────────────────────────────────────────────

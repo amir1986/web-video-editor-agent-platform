@@ -19,7 +19,7 @@
 
 const fs = require("fs");
 const express = require("express");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
 
@@ -92,7 +92,7 @@ class GoogleChatChannel extends BaseChannel {
       const authClient = await this.auth.getClient();
       const token = await authClient.getAccessToken();
 
-      const dlRes = await fetch(attachment.downloadUri, {
+      const dlRes = await fetchWithTimeout(attachment.downloadUri, {
         headers: { Authorization: `Bearer ${token.token}` },
       });
       if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
