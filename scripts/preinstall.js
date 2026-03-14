@@ -1,8 +1,20 @@
 #!/usr/bin/env node
-// Preinstall hook — intentional no-op.
+// Preinstall hook — clean stale workspace node_modules.
 //
-// check-deps.js requires node_modules to already be present, so running it
-// at preinstall time (before packages are installed) is meaningless.
-// The full dependency health check is enforced by:
-//   - `npm run check-deps`  (run manually after any dependency change)
-//   - CI `dependency-check` job (runs on every PR and push to master)
+// npm ci only removes the root node_modules. Stale workspace-level
+// node_modules (e.g. apps/api/node_modules/undici) can survive and
+// cause phantom audit findings. This script removes them so every
+// install starts from a clean slate.
+
+const fs = require('fs');
+const path = require('path');
+
+const root = path.resolve(__dirname, '..');
+const workspaces = ['apps/api', 'apps/web', 'packages/core'];
+
+for (const ws of workspaces) {
+  const nm = path.join(root, ws, 'node_modules');
+  if (fs.existsSync(nm)) {
+    fs.rmSync(nm, { recursive: true, force: true });
+  }
+}
