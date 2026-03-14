@@ -367,7 +367,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
 
   // Has soft transitions — need to re-encode with filter_complex.
   // Uses xfade for ALL transitions when soft transitions are present
-  // (hard_cut becomes a very short fade to keep the filter graph uniform).
+  // (hard_cut uses a 1-frame xfade to keep the filter graph uniform —
+  // mixing concat and xfade in the same chain causes PTS/format mismatches
+  // that produce garbled frames at transition boundaries).
   const FADE_DURATION = 0.5; // seconds for soft transition overlap
 
   // Extract each segment to its own file.
@@ -419,17 +421,19 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
   };
 
-  // Normalize each input stream to ensure consistent pixel format, SAR, and
-  // frame rate before passing to xfade/concat. VFR phone videos can have
-  // inconsistent frame timing between segments — without fps normalization the
-  // concat filter freezes on the last frame of a segment before the next begins.
+  // Normalize each input stream to ensure consistent pixel format, resolution,
+  // SAR, and frame rate before passing to xfade. Any mismatch in resolution or
+  // pixel format between xfade inputs produces garbled/corrupted frames.
   const normFps = sourceQuality?.video?.fps > 0 ? sourceQuality.video.fps : 30;
+  const normW = sourceQuality?.video?.width > 0 ? sourceQuality.video.width : -2;
+  const normH = sourceQuality?.video?.height > 0 ? sourceQuality.video.height : -2;
+  const scaleFilter = (normW > 0 && normH > 0) ? `,scale=${normW}:${normH}` : "";
   const normParts = [];
   const normVideoLabels = [];
   const normAudioLabels = [];
   for (let i = 0; i < segFiles.length; i++) {
     const normVLabel = `[nv${i}]`;
-    normParts.push(`[${i}:v]format=yuv420p,setsar=1,fps=fps=${normFps}${normVLabel}`);
+    normParts.push(`[${i}:v]format=yuv420p,setsar=1${scaleFilter},fps=fps=${normFps}${normVLabel}`);
     normVideoLabels.push(normVLabel);
     if (hasAudio) {
       const normALabel = `[na${i}]`;
@@ -438,8 +442,11 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
   }
 
-  // Build the filter chain using concat for hard cuts and xfade for soft
-  // transitions.
+  // Build the filter chain using xfade for ALL transitions. Hard cuts use a
+  // 1-frame xfade (instantaneous cut) to keep the graph uniform — mixing
+  // concat and xfade in the same chain causes PTS/format mismatches that
+  // produce garbled frames at transition boundaries.
+  const HARD_CUT_DUR = 1 / normFps; // 1 frame — visually instant
   let filterParts = [];
   let audioParts = [];
   let lastVideoLabel = normVideoLabels[0];
@@ -455,26 +462,17 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     const nextVLabel = normVideoLabels[i + 1];
     const nextALabel = hasAudio ? normAudioLabels[i + 1] : null;
 
-    if (tType === "hard_cut") {
-      // Use concat filter for clean hard cuts — no overlap, no artifacts
-      filterParts.push(`${lastVideoLabel}${nextVLabel}concat=n=2:v=1:a=0${outLabel}`);
-      if (hasAudio) {
-        audioParts.push(`${lastAudioLabel}${nextALabel}concat=n=2:v=0:a=1${aOutLabel}`);
-        lastAudioLabel = aOutLabel;
-      }
-      cumulativeOffset += segDurations[i + 1]; // No overlap for hard cuts
-    } else {
-      // Use xfade for soft transitions (dissolve, fade, etc.)
-      const fadeDur = FADE_DURATION;
-      const offset = Math.max(0, cumulativeOffset - fadeDur);
-      filterParts.push(`${lastVideoLabel}${nextVLabel}xfade=transition=${xfadeType(tType)}:duration=${fadeDur}:offset=${offset.toFixed(3)}${outLabel}`);
-      if (hasAudio) {
-        audioParts.push(`${lastAudioLabel}${nextALabel}acrossfade=d=${fadeDur}${aOutLabel}`);
-        lastAudioLabel = aOutLabel;
-      }
-      // xfade overlaps by fadeDur, so net position = offset + next segment duration
-      cumulativeOffset = offset + segDurations[i + 1];
+    const isHardCut = (tType === "hard_cut");
+    const fadeDur = isHardCut ? HARD_CUT_DUR : FADE_DURATION;
+    const xfName = isHardCut ? "fade" : xfadeType(tType);
+    const offset = Math.max(0, cumulativeOffset - fadeDur);
+
+    filterParts.push(`${lastVideoLabel}${nextVLabel}xfade=transition=${xfName}:duration=${fadeDur.toFixed(6)}:offset=${offset.toFixed(3)}${outLabel}`);
+    if (hasAudio) {
+      audioParts.push(`${lastAudioLabel}${nextALabel}acrossfade=d=${fadeDur.toFixed(6)}${aOutLabel}`);
+      lastAudioLabel = aOutLabel;
     }
+    cumulativeOffset = offset + segDurations[i + 1];
     lastVideoLabel = outLabel;
   }
 
