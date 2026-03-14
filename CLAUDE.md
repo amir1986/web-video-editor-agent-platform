@@ -94,6 +94,10 @@ MOCK_OLLAMA=1 npm run test:e2e
 
 E2E tests are part of the standard verification flow. Run them alongside unit tests before pushing.
 
+## Architecture Review
+
+- Review the entire project and find architectural inconsistencies in the microservices communication.
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:
