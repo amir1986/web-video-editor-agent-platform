@@ -94,9 +94,92 @@ MOCK_OLLAMA=1 npm run test:e2e
 
 E2E tests are part of the standard verification flow. Run them alongside unit tests before pushing.
 
-## Architecture Review
+## Architecture Review — Microservices Communication Inconsistencies
 
-- Review the entire project and find architectural inconsistencies in the microservices communication.
+The following architectural inconsistencies were identified across the project's inter-service communication patterns:
+
+### 1. Duplicated Type Definitions — `packages/core` Is Unused
+
+- `packages/core/index.ts` defines `ProjectState`, `Clip`, `InOut`, `Title`, `Export` types.
+- **Neither `apps/web` nor `apps/api` imports from `@video-editor/core`.** The web app re-declares its own `ProjectState`, `Clip`, `Segment`, `EditPlan`, `TextOverlay` interfaces directly in `App.tsx` (lines 47–70).
+- The API (`apps/api`) is plain JavaScript and ignores the core types entirely.
+- **Impact:** The shared package exists but serves no purpose. Type drift is already happening — the web `Clip` has `url` instead of `path`, and `ProjectState` in the web includes `editPlan`, `overlays`, `volume`, `savedAgentSummary` that don't exist in core.
+
+### 2. Inconsistent HTTP Client Libraries
+
+- **Bot → API** (`channels/base.js`): Uses Node's built-in `http.request` (callback-based, manual timeout handling).
+- **API → Ollama** (`ai/llm-client.js`): Uses `undici.fetch` with a custom `Agent` for timeout control.
+- **Web → API** (`App.tsx`): Uses browser `fetch`.
+- **Web → Ollama** (`App.tsx`): Also uses browser `fetch`, but **directly from the browser**, bypassing the API entirely.
+- **Impact:** No shared HTTP abstraction. Each communication path has its own error handling, retry logic, and timeout strategy.
+
+### 3. Web App Calls Ollama Directly (Bypasses API)
+
+- The web UI contacts Ollama at `http://localhost:11434` directly for both model listing (`/api/tags`, line 199) and AI analysis (`/v1/chat/completions`, line 420).
+- The API server also contacts Ollama for the same purpose via `/api/auto-edit` and `/api/analyze`.
+- **Impact:** Two separate LLM communication paths with different retry logic (API has 3-attempt exponential backoff; web has none), different model selection (API uses env vars; web uses a user-selected dropdown), and no shared rate limiting. The web path has no fallback if Ollama is slow or fails mid-request.
+
+### 4. Three Different Streaming Protocols for Progress
+
+- `/api/analyze`: **NDJSON** (`application/x-ndjson`) — newline-delimited JSON with `{type, agent, message, ts}`.
+- `/api/auto-edit-stream`: **SSE** (`text/event-stream`) — uses `event:` and `data:` fields with `{agent, message, timestamp}`.
+- WebChat channel: **WebSocket** — sends `{type: "progress", text: "..."}`.
+- **Impact:** Three different protocols for the same concept (progress updates). Field naming is also inconsistent: NDJSON uses `ts`, SSE uses `timestamp`, and WebSocket uses `text` instead of `message`.
+
+### 5. Metadata Transport Inconsistency (Headers vs. Body)
+
+- `/api/auto-edit`: Returns metadata in **custom HTTP headers** (`X-AI-Summary`, `X-Segments-Count`, `X-Video-Width`, `X-Style-Mode`, etc.).
+- `/api/render`: Receives `EditPlan` via `X-Edit-Plan` **header** (JSON squeezed into a single header line).
+- `/api/overlay`: Receives overlays via `X-Overlays` **header**.
+- `/api/approve-delivery`: Sends/receives `EditPlan` in the **JSON request/response body** (standard REST).
+- `/api/style-profile/:userId`: Standard **JSON body** responses.
+- **Impact:** Mixing metadata transport mechanisms. Headers have size limits (~8KB in most servers/proxies), which could silently truncate large `EditPlan` payloads. Standard REST practice is to use the body for structured data.
+
+### 6. Inconsistent Input Parsing Middleware
+
+- `/api/analyze`: Uses `express.json()` (via global middleware, 10MB limit) — receives frames as base64 in JSON body.
+- `/api/trim`, `/api/auto-edit`, `/api/render`, `/api/overlay`, `/api/adjust-audio`: Uses `express.raw({ type: "*/*", limit: "2gb" })` — receives raw video binary.
+- `/api/merge`: Uses `multer.array("videos", 20)` — multipart form-data.
+- `/api/approve-delivery`: Uses global `express.json()` — standard JSON body.
+- **Impact:** Three different body parsing strategies across the API. No documented convention for when to use which approach. The `/api/analyze` endpoint stands out by accepting frames as JSON base64 while all other video endpoints accept raw binary.
+
+### 7. `auto-edit-stream` Cannot Deliver the Output Video
+
+- `/api/auto-edit-stream` (line 829) renders the video, sends an SSE `complete` event, then **cleans up the temp files** in the `finally` block (line 904).
+- The comment on line 897 says "client must fetch the video via a separate request" but **there is no endpoint or mechanism to retrieve the rendered file** — it's deleted before the client could fetch it.
+- **Impact:** The SSE streaming endpoint is effectively broken for actually delivering the edited video.
+
+### 8. Queue Applied Inconsistently
+
+- `/api/auto-edit`: Wrapped in `enqueueAutoEdit()` — serialized to prevent VRAM overload.
+- `/api/auto-edit-stream`: **Not queued** — runs directly, can overload VRAM if called concurrently.
+- `/api/analyze`: **Not queued** — also runs the full LLM pipeline (`runEditPipeline`) without queue protection.
+- **Impact:** The queue exists to protect VRAM, but two of the three AI-heavy endpoints bypass it entirely, defeating the purpose.
+
+### 9. Duplicated Utility Functions
+
+- `toWslPath()`, `tmpFile()`, `cleanup()` are defined independently in both `apps/api/src/index.js` (lines 53–64) and `apps/api/src/channels/base.js` (lines 25–38).
+- They have slightly different implementations: `index.js` uses `va_` prefix for temp files, `base.js` uses `ch_` prefix.
+- FFmpeg/FFprobe wrappers exist in both files with different function names (`ffmpeg`/`ffprobe` in index.js vs `ffmpegExec`/`ffprobeExec` in base.js).
+- **Impact:** Code duplication within the same workspace. Bugs fixed in one copy may not be fixed in the other.
+
+### 10. Bot Calls Its Own API via HTTP Loopback
+
+- Bot channels run in the same Node.js process as the Express API (`npm run dev` starts both concurrently).
+- Yet channels call `http://localhost:3001/api/auto-edit` via HTTP (base.js line 129) instead of invoking the handler function directly.
+- **Impact:** Unnecessary network overhead, serialization/deserialization of potentially 2GB video buffers through HTTP. Adds latency and memory pressure (video is read into memory, then written to HTTP body, then read again by Express). A direct function call would be more efficient for in-process communication.
+
+### 11. Authentication Not Applied to Web → Ollama Path
+
+- The API has `authMiddleware` protecting all `/api/*` endpoints.
+- The web UI's direct Ollama calls (`http://localhost:11434`) bypass authentication entirely since they don't go through the API.
+- **Impact:** If `AUTH_SECRET` is set to protect the API, the AI analysis features still work unauthenticated via the direct Ollama path from the browser.
+
+### 12. CORS Origin Duplicated and Hardcoded
+
+- API server sets CORS: `process.env.CORS_ORIGIN || "http://localhost:5173"` (index.js line 50).
+- `/api/auto-edit-stream` **manually re-sets** `Access-Control-Allow-Origin` in its `writeHead` call (line 837) instead of relying on the CORS middleware.
+- The Ollama base URL `http://localhost:11434` is hardcoded in the web app (App.tsx line 33) with no env var override, unlike the API base URL which uses `VITE_API_URL`.
 
 ## Workflow Checklist
 
