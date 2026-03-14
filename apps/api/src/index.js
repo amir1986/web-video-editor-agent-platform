@@ -47,8 +47,22 @@ function authMiddleware(req, res, next) {
 }
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+  exposedHeaders: ["X-AI-Summary", "X-Segments-Count", "X-Video-Width", "X-Video-Height", "X-Video-Duration"],
+}));
 app.use(express.json({ limit: "10mb" }));
+
+// Accept video MIME types and application/octet-stream (common for raw uploads)
+const VIDEO_CONTENT_TYPES = /^(video\/|application\/octet-stream)/;
+function validateVideoContentType(req, res) {
+  const ct = req.headers["content-type"] || "";
+  if (ct && !VIDEO_CONTENT_TYPES.test(ct)) {
+    res.status(415).json({ error: `Unsupported content type: ${ct}. Expected video/* or application/octet-stream` });
+    return false;
+  }
+  return true;
+}
 
 function toWslPath(p) {
   if (process.platform === "win32") {
@@ -613,7 +627,7 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
     res.end();
   } catch (err) {
     console.error("[ANALYZE ERROR]", err);
-    sendLine({ type: "error", error: "Analysis failed", message: err.message });
+    sendLine({ type: "error", error: "Analysis failed", message: err.message || "Unknown error" });
     res.end();
   } finally {
     setProgressCallback(null);
@@ -622,6 +636,7 @@ app.post("/api/analyze", authMiddleware, async (req, res) => {
 
 //  POST /api/trim 
 app.post("/api/trim", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const inSec  = parseFloat(req.query.in  || "0");
   const outSec = parseFloat(req.query.out || "0");
@@ -666,6 +681,7 @@ app.get("/api/auto-edit/status", authMiddleware, (req, res) => {
 //  POST /api/auto-edit — multi-agent highlight reel (bots + API clients)
 //  Requests are queued and processed sequentially (VRAM constraint).
 app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name   = req.query.name || "video";
   const botUserId = req.query.userId || req.headers["x-user-id"] || null;
@@ -760,6 +776,7 @@ app.post("/api/auto-edit", authMiddleware, express.raw({ type: "*/*", limit: "2g
 //  The web client already has the EditPlan from /api/analyze, so this
 //  endpoint skips AI entirely and only does the ffmpeg rendering step.
 app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
 
@@ -827,6 +844,7 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
  * Events: { agent, message, timestamp }
  */
 app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
   // Set up SSE headers
@@ -860,7 +878,7 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
     const durationStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wslIn]);
     const duration = parseFloat(durationStr);
     if (isNaN(duration) || duration <= 0) {
-      sendEvent("error", { message: "Could not determine video duration" });
+      sendEvent("error", { error: "Invalid video", message: "Could not determine video duration" });
       res.end();
       cleanup(tmpIn, tmpOut);
       try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
@@ -897,7 +915,7 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
     // Note: client must fetch the video via a separate request
     // The output video path is available for download
   } catch (err) {
-    sendEvent("error", { message: err.message });
+    sendEvent("error", { error: "Auto-edit failed", message: err.message || "Unknown error" });
     res.end();
   } finally {
     setProgressCallback(null); // Clear callback
@@ -1017,6 +1035,7 @@ app.delete("/api/style-profile/:userId", authMiddleware, (req, res) => {
  *   - from, to: time range in seconds (optional — full video if omitted)
  */
 app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
 
   const overlaysHeader = req.headers["x-overlays"];
@@ -1080,6 +1099,7 @@ app.post("/api/overlay", authMiddleware, express.raw({ type: "*/*", limit: "2gb"
  * Query: volume (0-200, percentage, default 100)
  */
 app.post("/api/adjust-audio", authMiddleware, express.raw({ type: "*/*", limit: "2gb" }), async (req, res) => {
+  if (!validateVideoContentType(req, res)) return;
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const volume = parseFloat(req.query.volume || "100");
   if (isNaN(volume) || volume < 0 || volume > 200) return res.status(400).json({ error: "Volume must be 0-200" });

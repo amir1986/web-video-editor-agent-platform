@@ -10,7 +10,7 @@
 
 const { Bot, InputFile } = require("grammy");
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_BOT_API_DOWNLOAD = 20 * 1024 * 1024;
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
@@ -119,7 +119,7 @@ class TelegramChannel extends BaseChannel {
     try {
       const file = await this.bot.api.getFile(fileId);
       const url = `https://api.telegram.org/file/bot${this._token}/${file.file_path}`;
-      const resp = await fetch(url);
+      const resp = await fetchWithTimeout(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       fs.writeFileSync(destPath, Buffer.from(await resp.arrayBuffer()));
     } catch (err) {

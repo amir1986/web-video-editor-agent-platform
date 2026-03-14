@@ -3,6 +3,7 @@ import "./App.css";
 import { saveProjectState as saveToDB, loadProjectState as loadFromDB, saveFile, loadFile } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
 import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
+import { ensureAuthToken, apiFetch } from "./utils/api-client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,20 +42,11 @@ function isVideoFile(file: File): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — imported from the shared core package (single source of truth)
 // ---------------------------------------------------------------------------
 
-interface Clip { id: string; name: string; url: string; duration: number; }
-interface Segment { id: string; src_in: number; src_out: number; }
-interface Transition { from: string; to: string; type: string; }
-interface EditPlan {
-  segments: Segment[];
-  transitions?: Transition[];
-  render_constraints?: Record<string, unknown>;
-  notes?: Record<string, unknown>;
-  quality_guard?: { constraints_ok: boolean; checks: Record<string, boolean>; required_fixes: string[] };
-}
-interface TextOverlay { id: string; text: string; x: number; y: number; fontSize: number; color: string; from: number; to: number; }
+import type { Clip, Segment, Transition, EditPlan, TextOverlay as CoreTextOverlay } from "core";
+type TextOverlay = CoreTextOverlay & { from: number; to: number; };
 interface ProjectState {
   clips: Clip[];
   inOut: { in: number; out: number };
@@ -132,6 +124,9 @@ export default function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  // Acquire auth token on mount (works even if API uses open access)
+  useEffect(() => { ensureAuthToken(API_BASE).catch(() => {}); }, []);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -427,6 +422,66 @@ export default function App() {
       return data.choices?.[0]?.message?.content || "";
     };
 
+    // ── Helper: try the API's /api/analyze endpoint first ─────────────────
+    // This uses the server-side multi-agent pipeline (same one the bot uses).
+    // If the API has no LLM configured or returns an error, we fall back to
+    // the Ollama client-side pipeline below.
+    const tryApiAnalyze = async (): Promise<EditPlan | null> => {
+      const markStep = (step: string) => {
+        if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
+        setAgentCurrentStep(step);
+        setAgentProgress(prev => [...prev, `[${step}] Running...`]);
+      };
+
+      const frames = await extractFrames(videoRef.current!, 10);
+      const width = videoRef.current!.videoWidth || 0;
+      const height = videoRef.current!.videoHeight || 0;
+      const fps = 30;
+
+      markStep("CUT");
+
+      const res = await apiFetch(`${API_BASE}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duration, frames, width, height, fps }),
+      });
+
+      if (!res.ok) return null;
+
+      // Parse NDJSON stream
+      const reader = res.body?.getReader();
+      if (!reader) return null;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: EditPlan | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "progress") {
+              const step = event.agent || "SYSTEM";
+              if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
+              setAgentCurrentStep(step);
+              setAgentProgress(prev => [...prev, `[${step}] ${event.message}`]);
+            } else if (event.type === "result") {
+              result = event.editPlan;
+            } else if (event.type === "error") {
+              console.warn("[API ANALYZE]", event.error, event.message);
+              return null;
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      }
+      return result;
+    };
+
     const extractJSON = (text: string): any => {
       const m = text.match(/\{[\s\S]*\}/);
       if (!m) throw new Error("No JSON in AI response: " + text.slice(0, 200));
@@ -454,10 +509,27 @@ export default function App() {
     };
 
     try {
-      const frames = await extractFrames(videoRef.current, 10);
-      const width = videoRef.current.videoWidth || 0;
-      const height = videoRef.current.videoHeight || 0;
-      const fps = 30;
+      // ── Strategy: try API pipeline first, fall back to Ollama ──────────
+      let apiResult: EditPlan | null = null;
+      try {
+        apiResult = await tryApiAnalyze();
+      } catch (e) {
+        console.warn("[API ANALYZE] Failed, falling back to Ollama:", e);
+      }
+
+      if (apiResult && apiResult.segments?.length) {
+        // API pipeline succeeded — use its result directly
+        const segs = apiResult.segments;
+        let newInOut = state.inOut;
+        if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
+        save({ ...state, inOut: newInOut, editPlan: apiResult });
+        saveAgentSummary(`${segs.length} highlights selected via API pipeline`);
+      } else {
+        // Fall back to Ollama client-side pipeline
+        const frames = await extractFrames(videoRef.current, 10);
+        const width = videoRef.current.videoWidth || 0;
+        const height = videoRef.current.videoHeight || 0;
+        const fps = 30;
 
       // ── Step marker helper ───────────────────────────────────────────────
       const markStep = (step: string) => {
@@ -587,6 +659,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
       save({ ...state, inOut: newInOut, editPlan });
       saveAgentSummary(`${segs.length} highlights selected via Ollama [${selectedModel}]`);
+      }
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -605,17 +678,18 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
   };
 
   const handleExport = async () => {
-    if (!activeClip || exporting || agentLoading) return;
+    if (!activeClip?.url || exporting || agentLoading) return;
     setExporting(true);
     setExportProgress(0);
     setExportDone(false);
     try {
+      const clipUrl = activeClip.url;
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
       const editPlan = state.editPlan;
       if (editPlan && editPlan.segments.length > 1) {
-        await exportWithEditPlan(activeClip.url, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
+        await exportWithEditPlan(clipUrl, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
       } else {
-        await exportTrimmed(activeClip.url, state.inOut.in, state.inOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
+        await exportTrimmed(clipUrl, state.inOut.in, state.inOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
       }
       setExportDone(true);
     } catch (err) {
@@ -633,12 +707,12 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
     try {
       const formData = new FormData();
       for (const clip of state.clips) {
-        const resp = await fetch(clip.url);
+        const resp = await fetch(clip.url!);
         const blob = await resp.blob();
         formData.append("videos", blob, clip.name);
       }
       setExportProgress(30);
-      const res = await fetch(`${API_BASE}/api/merge?name=merged`, {
+      const res = await apiFetch(`${API_BASE}/api/merge?name=merged`, {
         method: "POST",
         body: formData,
       });

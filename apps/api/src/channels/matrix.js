@@ -12,7 +12,7 @@
  */
 
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
@@ -117,7 +117,7 @@ class MatrixChannel extends BaseChannel {
     const match = mxcUrl.match(/^mxc:\/\/([^/]+)\/(.+)$/);
     if (!match) throw new Error(`Invalid MXC URL: ${mxcUrl}`);
     const [, serverName, mediaId] = match;
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `${this._homeserver}/_matrix/media/v3/download/${serverName}/${mediaId}`,
       { headers: { Authorization: `Bearer ${this._token}` } }
     );

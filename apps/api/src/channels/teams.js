@@ -12,7 +12,7 @@
  */
 
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile, API_URL } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, API_URL, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 250 * 1024 * 1024;
 
@@ -90,7 +90,7 @@ class TeamsChannel extends BaseChannel {
         if (token) headers.Authorization = `Bearer ${token}`;
       }
 
-      const dlRes = await fetch(url, { headers });
+      const dlRes = await fetchWithTimeout(url, { headers });
       if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
       const buffer = Buffer.from(await dlRes.arrayBuffer());
       fs.writeFileSync(tmpIn, buffer);
