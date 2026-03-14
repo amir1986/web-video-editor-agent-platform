@@ -66,6 +66,10 @@
 - Use plain `node scripts/foo.js` for any logic that needs error suppression or conditional execution.
 - Use `{ stdio: ['inherit', 'pipe', 'pipe'] }` in `child_process.execSync` calls instead of appending `2>/dev/null` to the command string.
 
+## Architecture Review
+
+Review the entire project and find architectural inconsistencies in the microservices communication.
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:
