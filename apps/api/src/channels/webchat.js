@@ -79,15 +79,15 @@ class WebChatChannel extends BaseChannel {
       try { ws.send(JSON.stringify(obj)); } catch {}
     };
 
-    send({ type: "progress", text: "Video received, processing..." });
+    send({ type: "progress", agent: "SYSTEM", message: "Video received, processing...", timestamp: Date.now() });
 
     try {
       fs.writeFileSync(tmpIn, data);
 
       // Style Engine: use WebChat session ID as videographer identity
       const wcUserId = `wc_${sessionId}`;
-      const result = await processVideo(tmpIn, meta.name, this.maxUpload, (text) => {
-        send({ type: "progress", text });
+      const result = await processVideo(tmpIn, meta.name, this.maxUpload, (message) => {
+        send({ type: "progress", agent: "PIPELINE", message, timestamp: Date.now() });
       }, { userId: wcUserId });
 
       send({
