@@ -20,7 +20,8 @@
     "check-deps:full": "node scripts/check-deps.js --audit",
     "test:e2e": "npx playwright test --config e2e/playwright.config.ts",
     "test:e2e:headed": "npx playwright test --config e2e/playwright.config.ts --headed",
-    "preinstall": "node scripts/preinstall.js"
+    "preinstall": "node scripts/preinstall.js",
+    "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",
