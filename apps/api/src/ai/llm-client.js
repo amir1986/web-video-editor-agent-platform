@@ -62,7 +62,13 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || "";
+  let text = data.choices?.[0]?.message?.content || "";
+
+  // Qwen "thinking" models wrap reasoning in <think>…</think> before the
+  // actual answer. Strip the thinking block so the JSON regex doesn't pick
+  // up malformed fragments from the reasoning chain.
+  text = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("LLM returned no JSON: " + text.slice(0, 300));
   return JSON.parse(match[0]);

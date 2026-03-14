@@ -469,7 +469,11 @@ export default function App() {
     };
 
     const extractJSON = (text: string): any => {
-      const m = text.match(/\{[\s\S]*\}/);
+      // Strip <think>…</think> blocks from Qwen "thinking" models before
+      // extracting JSON — the reasoning chain often contains malformed
+      // JSON fragments that break the greedy regex.
+      const cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      const m = cleaned.match(/\{[\s\S]*\}/);
       if (!m) throw new Error("No JSON in AI response: " + text.slice(0, 200));
       return JSON.parse(m[0]);
     };
