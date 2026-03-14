@@ -72,7 +72,9 @@ function triggerDownload(blob: Blob, filename: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Revoke after a delay — revoking immediately truncates the download
+  // because a.click() starts the save asynchronously.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export function preloadFFmpeg(): Promise<void> {

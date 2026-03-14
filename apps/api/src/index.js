@@ -360,9 +360,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
     const concatFile = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    // Re-encode the concat output to fix timestamp/keyframe discontinuities
-    // at segment boundaries that cause playback to freeze mid-video.
-    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
+    // Segments are already re-encoded with identical params — stream copy is
+    // safe here and avoids wasteful double encoding.
+    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
     for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
     return;
   }
@@ -513,10 +513,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
         await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
       }
     } else {
-      // Single segment after xfade path — re-encode to avoid timestamp issues
       const concatFile = path.join(tmpDir, "concat.txt");
       fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-      await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
+      await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
     }
   } finally {
     for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
