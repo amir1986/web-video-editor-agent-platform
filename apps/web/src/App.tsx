@@ -400,6 +400,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: selectedModel, messages, stream: false }),
+        signal: AbortSignal.timeout(60_000), // 60s — fail fast when Ollama is overloaded
       });
       if (!resp.ok) throw new Error(`Ollama error: ${resp.status}`);
       const data = await resp.json();
@@ -428,6 +429,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ duration, frames, width, height, fps }),
+        signal: AbortSignal.timeout(120_000), // 2 min — analysis can be slow but shouldn't hang
       });
 
       if (!res.ok) return null;
