@@ -20,6 +20,16 @@ const { Agent, fetch: undiciFetch } = require("undici");
 const WSL_DISTRO = process.env.WSL_DISTRO || "Ubuntu-24.04";
 const API_URL = process.env.API_URL || "http://localhost:3001";
 
+// ── Shared HTTP helper — fetch with timeout ─────────────────────────────────
+
+/**
+ * fetch() wrapper with a configurable timeout (default 2 min).
+ * Prevents channel download/upload calls from hanging indefinitely.
+ */
+function fetchWithTimeout(url, options = {}, timeoutMs = 2 * 60 * 1000) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
 function toWslPath(p) {
@@ -187,4 +197,4 @@ class BaseChannel {
   async stop() {}
 }
 
-module.exports = { BaseChannel, processVideo, compressVideo, tmpFile, cleanup, toWslPath, API_URL };
+module.exports = { BaseChannel, processVideo, compressVideo, tmpFile, cleanup, toWslPath, API_URL, fetchWithTimeout };

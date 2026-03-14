@@ -25,7 +25,7 @@
 
 const fs = require("fs");
 const express = require("express");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 25 * 1024 * 1024;
 const ZALO_GRAPH = "https://graph.zalo.me/v2.0";
@@ -141,7 +141,7 @@ class ZaloPersonalChannel extends BaseChannel {
       const url = attachment.payload?.url;
       if (!url) throw new Error("No download URL in attachment");
 
-      const dlRes = await fetch(url, { headers: this._headers() });
+      const dlRes = await fetchWithTimeout(url, { headers: this._headers() });
       if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
       const buffer = Buffer.from(await dlRes.arrayBuffer());
       fs.writeFileSync(tmpIn, buffer);

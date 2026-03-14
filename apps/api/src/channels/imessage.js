@@ -16,7 +16,7 @@
  */
 
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 const MAX_UPLOAD = 100 * 1024 * 1024;
 
@@ -124,7 +124,7 @@ class iMessageChannel extends BaseChannel {
     try {
       // Download attachment from BlueBubbles
       const dlUrl = this._apiUrl(`/attachment/${attachment.guid}/download`);
-      const dlRes = await fetch(dlUrl);
+      const dlRes = await fetchWithTimeout(dlUrl);
       if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
       const buffer = Buffer.from(await dlRes.arrayBuffer());
       fs.writeFileSync(tmpIn, buffer);

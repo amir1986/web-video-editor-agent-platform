@@ -15,7 +15,7 @@
  */
 
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile, fetchWithTimeout } = require("./base");
 
 class SlackChannel extends BaseChannel {
   constructor() {
@@ -71,7 +71,7 @@ class SlackChannel extends BaseChannel {
 
     try {
       // Download file from Slack
-      const dlRes = await fetch(file.url_private_download || file.url_private, {
+      const dlRes = await fetchWithTimeout(file.url_private_download || file.url_private, {
         headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
       });
       if (!dlRes.ok) throw new Error(`Slack download failed: ${dlRes.status}`);
