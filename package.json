@@ -20,12 +20,12 @@
     "check-deps:full": "node scripts/check-deps.js --audit",
     "test:e2e": "npx playwright test --config e2e/playwright.config.ts",
     "test:e2e:headed": "npx playwright test --config e2e/playwright.config.ts --headed",
-    "preinstall": "node scripts/preinstall.js",
-    "postinstall": "node scripts/postinstall.js"
+    "preinstall": "node scripts/preinstall.js"
   },
   "dependencies": {
     "@telegram.ts/types": "^1.26.0",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "undici": "^7.24.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
@@ -41,7 +41,7 @@
     "@discordjs/ws": {
       "undici": "6.24.1"
     },
-    "undici": "7.24.3",
+    "undici": "$undici",
     "file-type": "21.3.2"
   }
 }
