@@ -12,7 +12,7 @@
  */
 
 const fs = require("fs");
-const { BaseChannel, processVideo, cleanup, tmpFile, API_URL } = require("./base");
+const { BaseChannel, processVideo, cleanup, tmpFile } = require("./base");
 
 const MAX_UPLOAD = 250 * 1024 * 1024;
 

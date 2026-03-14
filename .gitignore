@@ -20,3 +20,4 @@ data/*.db-shm
 e2e/fixtures/
 e2e/test-results/
 e2e/playwright-report/
+test-results/

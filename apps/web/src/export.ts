@@ -46,17 +46,13 @@ export async function exportWithEditPlan(
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
-  // Send to /api/render with the EditPlan in a header — skips the AI pipeline
-  // entirely and only does the ffmpeg rendering step.
+  const editPlanParam = encodeURIComponent(JSON.stringify(editPlan));
   const res = await fetch(
-    `${apiBase}/api/render?name=${name}`,
+    `${apiBase}/api/render?name=${name}&editPlan=${editPlanParam}`,
     {
       method: "POST",
       body: videoBlob,
-      headers: {
-        "Content-Type": "video/mp4",
-        "X-Edit-Plan": JSON.stringify(editPlan),
-      },
+      headers: { "Content-Type": "video/mp4" },
     }
   );
 
