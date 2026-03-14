@@ -360,7 +360,9 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     }
     const concatFile = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
+    // Re-encode the concat output to fix timestamp/keyframe discontinuities
+    // at segment boundaries that cause playback to freeze mid-video.
+    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
     for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
     return;
   }
