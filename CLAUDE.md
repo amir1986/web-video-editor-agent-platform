@@ -118,6 +118,10 @@ All progress events use the standardized shape `{ type, agent, message, timestam
 - `apps/api/src/shared/auto-edit-pipeline.js` — core auto-edit processing (used by both HTTP routes and bot channels directly)
 - `packages/core/index.ts` — shared TypeScript types (imported by `apps/web`)
 
+## Architecture Review
+
+Review the entire project and find architectural inconsistencies in the microservices communication.
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:
