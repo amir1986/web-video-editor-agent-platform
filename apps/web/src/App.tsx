@@ -564,6 +564,22 @@ export default function App() {
         const height = videoRef.current.videoHeight || 0;
         const fps = 30;
 
+      // ── Quick Ollama health check ─────────────────────────────────────────
+      // Avoid 3× 60s timeout cascade when Ollama is down
+      let ollamaReachable = ollamaConnected;
+      if (ollamaReachable) {
+        try {
+          const ping = await fetch(`${API_BASE}/api/ollama/tags`, { signal: AbortSignal.timeout(5_000) });
+          ollamaReachable = ping.ok;
+        } catch {
+          ollamaReachable = false;
+        }
+        if (!ollamaReachable) {
+          setOllamaConnected(false);
+          setAgentProgress(prev => [...prev, "[SYSTEM] Ollama went offline — using time-based fallback"]);
+        }
+      }
+
       // ── Step marker helper ───────────────────────────────────────────────
       const markStep = (step: string) => {
         if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
@@ -584,7 +600,10 @@ export default function App() {
       // ── 1. CUT AGENT (LLM + vision via Ollama) ────────────────────────────
       markStep("CUT");
       let cutSegments: Segment[] = [];
-      try {
+      if (!ollamaReachable) {
+        cutSegments = buildFallback(duration).segments;
+        setAgentProgress(prev => [...prev, `[CUT] Ollama offline — using time-based fallback`]);
+      } else try {
         const cutPrompt = `You are the CUT AGENT — a professional video editor. Select the strongest 2-6 segments to keep for a highlight reel.
 RULES:
 - Total kept time MUST be less than ${(duration * 0.75).toFixed(1)} seconds.
@@ -604,6 +623,7 @@ VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
       } catch (e) {
         console.warn("[CUT] AI failed, using fallback:", e);
         cutSegments = buildFallback(duration).segments;
+        ollamaReachable = false; // Skip remaining LLM agents — don't waste 60s each
         setAgentProgress(prev => [...prev, `[CUT] Ollama unavailable — using time-based fallback (not based on video content)`]);
       }
       setAgentProgress(prev => [...prev, `[CUT] Selected ${cutSegments.length} segments`]);
@@ -611,32 +631,36 @@ VIDEO: duration=${duration.toFixed(1)}s, ${width}x${height}, ${fps}fps.`;
       // ── 2. STRUCTURE AGENT (LLM) ──────────────────────────────────────────
       markStep("STRUCTURE");
       let structSegments: Segment[] = cutSegments;
-      try {
-        const structPrompt = `You are the STRUCTURE AGENT. Reorder/adjust these segments for the best narrative arc (hook→buildup→climax→resolution). Total kept duration must stay between 30-75% of ${duration.toFixed(1)}s.
+      if (ollamaReachable) {
+        try {
+          const structPrompt = `You are the STRUCTURE AGENT. Reorder/adjust these segments for the best narrative arc (hook→buildup→climax→resolution). Total kept duration must stay between 30-75% of ${duration.toFixed(1)}s.
 Input: ${JSON.stringify(cutSegments)}
 Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>},...],"structure_notes":"..."}`;
-        const structResp = await ollamaChat([{ role: "user", content: structPrompt }]);
-        const structResult = extractJSON(structResp);
-        const valid = (structResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
-        if (valid.length) structSegments = valid;
-      } catch (e) {
-        console.warn("[STRUCTURE] AI failed, keeping cut order:", e);
+          const structResp = await ollamaChat([{ role: "user", content: structPrompt }]);
+          const structResult = extractJSON(structResp);
+          const valid = (structResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
+          if (valid.length) structSegments = valid;
+        } catch (e) {
+          console.warn("[STRUCTURE] AI failed, keeping cut order:", e);
+        }
       }
       setAgentProgress(prev => [...prev, `[STRUCTURE] Arranged ${structSegments.length} segments`]);
 
       // ── 3. CONTINUITY AGENT (LLM) ─────────────────────────────────────────
       markStep("CONTINUITY");
       let contSegments: (Segment & { needs_soft_transition?: boolean })[] = structSegments.map(s => ({ ...s, needs_soft_transition: false }));
-      try {
-        const contPrompt = `You are the CONTINUITY AGENT. Review adjacent segment pairs for jarring transitions. Adjust boundaries by ±0.5s to improve flow. Flag segments needing soft transitions.
+      if (ollamaReachable) {
+        try {
+          const contPrompt = `You are the CONTINUITY AGENT. Review adjacent segment pairs for jarring transitions. Adjust boundaries by ±0.5s to improve flow. Flag segments needing soft transitions.
 Input: ${JSON.stringify(structSegments)}
 Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"needs_soft_transition":false},...],"continuity_notes":"..."}`;
-        const contResp = await ollamaChat([{ role: "user", content: contPrompt }]);
-        const contResult = extractJSON(contResp);
-        const valid = (contResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
-        if (valid.length) contSegments = valid;
-      } catch (e) {
-        console.warn("[CONTINUITY] AI failed, keeping structure result:", e);
+          const contResp = await ollamaChat([{ role: "user", content: contPrompt }]);
+          const contResult = extractJSON(contResp);
+          const valid = (contResult.segments || []).filter((s: any) => typeof s.src_in === "number" && typeof s.src_out === "number" && s.src_out > s.src_in);
+          if (valid.length) contSegments = valid;
+        } catch (e) {
+          console.warn("[CONTINUITY] AI failed, keeping structure result:", e);
+        }
       }
       setAgentProgress(prev => [...prev, `[CONTINUITY] Continuity pass done`]);
 
