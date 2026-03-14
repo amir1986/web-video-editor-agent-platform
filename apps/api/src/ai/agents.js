@@ -23,7 +23,7 @@
  * - SSE progress events for real-time pipeline updates
  */
 
-const { llmRequest } = require("./llm-client");
+const { llmRequest, isOllamaAvailable } = require("./llm-client");
 const { getEditingContext } = require("./knowledge-base");
 
 // ---------------------------------------------------------------------------
@@ -520,7 +520,13 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, opt
   const styleContext = options.styleContext || null;
   const log = (agent, msg) => emitProgress(agent, msg);
 
-  // 0. Style context
+  // 0. Pre-flight: check Ollama connectivity before expensive AI calls
+  const ollamaUp = await isOllamaAvailable();
+  if (!ollamaUp) {
+    log("SYSTEM", "Ollama is not reachable — using time-based fallback (start Ollama for AI-driven edits)");
+  }
+
+  // 0b. Style context
   if (styleContext) {
     log("STYLE", `Guided mode — injecting videographer style fingerprint`);
   } else {
@@ -530,12 +536,18 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, opt
   // 1. Cut Agent
   log("CUT", "Selecting best segments...");
   let cutResult;
-  try {
-    cutResult = await runCutAgent(videoMeta, frames, { videoPath: options.videoPath, styleContext });
-    log("CUT", `Selected ${cutResult.segments?.length} segments: ${cutResult.cut_notes || ""}`);
-  } catch (err) {
-    log("CUT", `AI failed (${err.message}), using time-based fallback`);
+  if (!ollamaUp) {
+    // Skip retries entirely — Ollama is confirmed down
     cutResult = buildFallbackCutResult(videoMeta.duration);
+    log("CUT", `Time-based fallback: ${cutResult.segments?.length} segments (${cutResult.cut_notes})`);
+  } else {
+    try {
+      cutResult = await runCutAgent(videoMeta, frames, { videoPath: options.videoPath, styleContext });
+      log("CUT", `Selected ${cutResult.segments?.length} segments: ${cutResult.cut_notes || ""}`);
+    } catch (err) {
+      log("CUT", `AI failed (${err.message}), using time-based fallback`);
+      cutResult = buildFallbackCutResult(videoMeta.duration);
+    }
   }
 
   // Validate cut result has usable segments
@@ -559,26 +571,39 @@ async function runEditPipeline(videoMeta, frames = [], sourceQuality = null, opt
   // 2. Structure Agent
   log("STRUCTURE", "Arranging segments for best narrative...");
   let structureResult;
-  try {
-    structureResult = await runStructureAgent(videoMeta, cutResult, { styleContext });
-    log("STRUCTURE", structureResult.structure_notes || "done");
-  } catch (err) {
-    log("STRUCTURE", `Failed (${err.message}), keeping original order`);
-    structureResult = { segments: cutResult.segments, structure_notes: "passthrough" };
+  if (!ollamaUp) {
+    structureResult = { segments: cutResult.segments, structure_notes: "passthrough (Ollama offline)" };
+    log("STRUCTURE", structureResult.structure_notes);
+  } else {
+    try {
+      structureResult = await runStructureAgent(videoMeta, cutResult, { styleContext });
+      log("STRUCTURE", structureResult.structure_notes || "done");
+    } catch (err) {
+      log("STRUCTURE", `Failed (${err.message}), keeping original order`);
+      structureResult = { segments: cutResult.segments, structure_notes: "passthrough" };
+    }
   }
 
   // 3. Continuity Agent
   log("CONTINUITY", "Checking for jarring cuts...");
   let continuityResult;
-  try {
-    continuityResult = await runContinuityAgent(videoMeta, structureResult, { styleContext });
-    log("CONTINUITY", continuityResult.continuity_notes || "done");
-  } catch (err) {
-    log("CONTINUITY", `Failed (${err.message}), skipping`);
+  if (!ollamaUp) {
     continuityResult = {
       segments: (structureResult.segments || []).map(s => ({ ...s, needs_soft_transition: false })),
-      continuity_notes: "skipped",
+      continuity_notes: "skipped (Ollama offline)",
     };
+    log("CONTINUITY", continuityResult.continuity_notes);
+  } else {
+    try {
+      continuityResult = await runContinuityAgent(videoMeta, structureResult, { styleContext });
+      log("CONTINUITY", continuityResult.continuity_notes || "done");
+    } catch (err) {
+      log("CONTINUITY", `Failed (${err.message}), skipping`);
+      continuityResult = {
+        segments: (structureResult.segments || []).map(s => ({ ...s, needs_soft_transition: false })),
+        continuity_notes: "skipped",
+      };
+    }
   }
 
   // 4. Transition Agent (deterministic — no LLM)
