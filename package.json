@@ -32,13 +32,15 @@
   },
   "overrides": {
     "discord.js": {
-      "undici": "6.23.0"
+      "undici": "6.24.1"
     },
     "@discordjs/rest": {
-      "undici": "6.23.0"
+      "undici": "6.24.1"
     },
     "@discordjs/ws": {
-      "undici": "6.23.0"
-    }
+      "undici": "6.24.1"
+    },
+    "undici": "7.24.2",
+    "file-type": "21.3.2"
   }
 }
