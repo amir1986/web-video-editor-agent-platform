@@ -870,6 +870,7 @@ app.post("/api/ollama/chat", authMiddleware, async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req.body),
+      signal: AbortSignal.timeout(90_000), // 90s — fail fast when Ollama is overloaded
     });
     if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
     const data = await resp.json();
