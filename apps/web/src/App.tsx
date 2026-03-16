@@ -1200,24 +1200,11 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
         <div className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto">
           {/* AI Panel — always visible (no tabs) */}
             <>
-              {/* Model selector — VL models for vision-driven analysis */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-0.5">
-                  Vision Model
-                </label>
-                <select
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                  disabled={agentLoading || modelsList.length === 0}
-                  className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  {modelsList.length === 0 && (
-                    <option value="">Loading models…</option>
-                  )}
-                  {modelsList.map(m => (
-                    <option key={m.id} value={m.id}>{m.label}</option>
-                  ))}
-                </select>
+              {/* Fixed vision model — best VL model on Ollama Cloud */}
+              <div className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-border bg-secondary/40 text-[10px]">
+                <Sparkles className="w-3 h-3 text-primary" />
+                <span className="text-muted-foreground">Model:</span>
+                <span className="font-mono font-semibold text-foreground">{DEFAULT_MODEL}</span>
               </div>
 
               {sessionResumeNeeded && activeClip && !agentLoading && (
