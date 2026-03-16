@@ -68,6 +68,11 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
   // actual answer. Strip the thinking block so the JSON regex doesn't pick
   // up malformed fragments from the reasoning chain.
   text = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  // Handle unclosed <think> tags (truncated responses) — strip from
+  // <think> to end of string so we look for JSON only before the thinking.
+  if (text.includes("<think>")) {
+    text = text.replace(/<think>[\s\S]*/g, "").trim();
+  }
 
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("LLM returned no JSON: " + text.slice(0, 300));

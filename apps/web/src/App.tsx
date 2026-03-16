@@ -477,7 +477,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: selectedModel, messages, stream: false }),
-        signal: AbortSignal.timeout(60_000), // 60s — fail fast when Ollama is overloaded
+        signal: AbortSignal.timeout(180_000), // 3min — QWEN vision calls take 60-120s
       });
       if (!resp.ok) throw new Error(`Ollama error: ${resp.status}`);
       const data = await resp.json();
@@ -506,7 +506,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ duration, frames, width, height, fps }),
-        signal: AbortSignal.timeout(120_000), // 2 min — analysis can be slow but shouldn't hang
+        signal: AbortSignal.timeout(300_000), // 5 min — QWEN pipeline runs 3 LLM agents that each take 60-120s
       });
 
       if (!res.ok) return null;
@@ -518,30 +518,36 @@ export default function App() {
       let buffer = "";
       let result: EditPlan | null = null;
 
+      const processLine = (line: string) => {
+        if (!line.trim()) return;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "progress") {
+            const step = event.agent || "SYSTEM";
+            if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
+            setAgentCurrentStep(step);
+            setAgentProgress(prev => [...prev, `[${step}] ${event.message}`]);
+          } else if (event.type === "result") {
+            result = event.editPlan;
+          } else if (event.type === "error") {
+            console.warn("[API ANALYZE]", event.error, event.message);
+          }
+        } catch { /* skip malformed lines */ }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            if (event.type === "progress") {
-              const step = event.agent || "SYSTEM";
-              if (!stepTimestampsRef.current[step]) stepTimestampsRef.current[step] = Date.now();
-              setAgentCurrentStep(step);
-              setAgentProgress(prev => [...prev, `[${step}] ${event.message}`]);
-            } else if (event.type === "result") {
-              result = event.editPlan;
-            } else if (event.type === "error") {
-              console.warn("[API ANALYZE]", event.error, event.message);
-              return null;
-            }
-          } catch { /* skip malformed lines */ }
-        }
+        for (const line of lines) processLine(line);
       }
+      // Flush remaining bytes from the TextDecoder and process any trailing line
+      // (the result event is the last line — if it wasn't terminated by \n it
+      // would be stuck in the buffer and the editPlan would be silently lost).
+      buffer += decoder.decode();
+      if (buffer.trim()) processLine(buffer);
       return result;
     };
 
@@ -549,7 +555,12 @@ export default function App() {
       // Strip <think>…</think> blocks from Qwen "thinking" models before
       // extracting JSON — the reasoning chain often contains malformed
       // JSON fragments that break the greedy regex.
-      const cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      let cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      // Handle unclosed <think> tags (truncated responses) — strip from
+      // <think> to end of string, then look for JSON before it.
+      if (cleaned.includes("<think>")) {
+        cleaned = cleaned.replace(/<think>[\s\S]*/g, "").trim();
+      }
       const m = cleaned.match(/\{[\s\S]*\}/);
       if (!m) throw new Error("No JSON in AI response: " + text.slice(0, 200));
       return JSON.parse(m[0]);
@@ -718,14 +729,16 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       // ── 5. CONSTRAINTS AGENT (deterministic) ──────────────────────────────
       markStep("CONSTRAINTS");
       const segs: Segment[] = contSegments.map(s => ({ id: s.id, src_in: s.src_in, src_out: s.src_out }));
-      for (let i = segs.length - 1; i >= 0; i--) {
+      // Forward iteration (must match server-side constraints agent) so that
+      // overlap fixes propagate correctly when earlier segments are removed.
+      for (let i = 0; i < segs.length; i++) {
         const s = segs[i];
         if (s.src_in < 0) s.src_in = 0;
         if (s.src_out > duration) s.src_out = duration;
-        if (s.src_out <= s.src_in) { segs.splice(i, 1); continue; }
+        if (s.src_out <= s.src_in) { segs.splice(i, 1); i--; continue; }
         if (i > 0 && s.src_in < segs[i - 1].src_out) {
           s.src_in = segs[i - 1].src_out;
-          if (s.src_out <= s.src_in) { segs.splice(i, 1); continue; }
+          if (s.src_out <= s.src_in) { segs.splice(i, 1); i--; continue; }
         }
       }
       segs.forEach((s, i) => { s.id = `s${i + 1}`; });
@@ -784,7 +797,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       const clipUrl = activeClip.url;
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
       const editPlan = state.editPlan;
-      if (editPlan && editPlan.segments.length > 1) {
+      if (editPlan && editPlan.segments.length > 0) {
         await exportWithEditPlan(clipUrl, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
       } else {
         await exportTrimmed(clipUrl, state.inOut.in, state.inOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);

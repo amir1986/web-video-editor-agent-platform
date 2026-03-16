@@ -465,8 +465,11 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     const nextALabel = hasAudio ? normAudioLabels[i + 1] : null;
 
     const isHardCut = (tType === "hard_cut");
-    const fadeDur = isHardCut ? HARD_CUT_DUR : FADE_DURATION;
-    const xfName = isHardCut ? "fade" : xfadeType(tType);
+    // If segment is too short for a soft transition, force hard cut
+    const segTooShort = segDurations[i] < FADE_DURATION * 2 || segDurations[i + 1] < FADE_DURATION * 2;
+    const effectiveHardCut = isHardCut || segTooShort;
+    const fadeDur = effectiveHardCut ? HARD_CUT_DUR : FADE_DURATION;
+    const xfName = effectiveHardCut ? "fade" : xfadeType(tType);
     const offset = Math.max(0, cumulativeOffset - fadeDur);
 
     filterParts.push(`${lastVideoLabel}${nextVLabel}xfade=transition=${xfName}:duration=${fadeDur.toFixed(6)}:offset=${offset.toFixed(3)}${outLabel}`);
@@ -872,7 +875,7 @@ app.post("/api/ollama/chat", authMiddleware, async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req.body),
-      signal: AbortSignal.timeout(90_000), // 90s — fail fast when Ollama is overloaded
+      signal: AbortSignal.timeout(300_000), // 5min — QWEN vision calls take 60-120s, match LLM client timeout
     });
     if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
     const data = await resp.json();
