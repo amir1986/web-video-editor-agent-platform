@@ -775,18 +775,31 @@ app.post("/api/auto-edit-stream", authMiddleware, express.raw({ type: "*/*", lim
 // ---------------------------------------------------------------------------
 // Ollama proxy — routes LLM calls through the API so auth is enforced
 // and the web app doesn't need direct access to Ollama.
+// Supports both local Ollama and Ollama Cloud (via LLM_PROVIDER env var).
 // ---------------------------------------------------------------------------
-const OLLAMA_URL_BASE = process.env.OLLAMA_URL
-  ? process.env.OLLAMA_URL.replace(/\/v1\/chat\/completions$/, "")
-  : "http://localhost:11434";
+const PROXY_LLM_PROVIDER = (process.env.LLM_PROVIDER || "ollama-cloud").toLowerCase();
+const OLLAMA_URL_BASE = (process.env.OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434")
+  .replace(/\/v1\/chat\/completions$/, "").replace(/\/v1\/?$/, "").replace(/\/$/, "");
+const OLLAMA_CLOUD_HOST_PROXY = (process.env.OLLAMA_CLOUD_HOST || "https://ollama.com").replace(/\/$/, "");
+const OLLAMA_API_KEY_PROXY = process.env.OLLAMA_API_KEY || "";
 const { fetch: undiciFetch } = require("undici");
 
 app.get("/api/ollama/tags", authMiddleware, async (_req, res) => {
   try {
-    const resp = await undiciFetch(`${OLLAMA_URL_BASE}/api/tags`);
-    if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
-    const data = await resp.json();
-    res.json(data);
+    if (PROXY_LLM_PROVIDER === "ollama-cloud") {
+      // Use Ollama Cloud API to list models
+      const headers = {};
+      if (OLLAMA_API_KEY_PROXY) headers["Authorization"] = `Bearer ${OLLAMA_API_KEY_PROXY}`;
+      const resp = await undiciFetch(`${OLLAMA_CLOUD_HOST_PROXY}/api/tags`, { headers, signal: AbortSignal.timeout(10_000) });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Ollama Cloud error: ${resp.status}` });
+      const data = await resp.json();
+      res.json(data);
+    } else {
+      const resp = await undiciFetch(`${OLLAMA_URL_BASE}/api/tags`);
+      if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
+      const data = await resp.json();
+      res.json(data);
+    }
   } catch (err) {
     res.status(503).json({ error: "Ollama unreachable", message: err.message });
   }
@@ -794,15 +807,30 @@ app.get("/api/ollama/tags", authMiddleware, async (_req, res) => {
 
 app.post("/api/ollama/chat", authMiddleware, async (req, res) => {
   try {
-    const resp = await undiciFetch(`${OLLAMA_URL_BASE}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body),
-      signal: AbortSignal.timeout(300_000), // 5min — QWEN vision calls take 60-120s, match LLM client timeout
-    });
-    if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
-    const data = await resp.json();
-    res.json(data);
+    if (PROXY_LLM_PROVIDER === "ollama-cloud") {
+      // Proxy through Ollama Cloud API (native format)
+      const headers = { "Content-Type": "application/json" };
+      if (OLLAMA_API_KEY_PROXY) headers["Authorization"] = `Bearer ${OLLAMA_API_KEY_PROXY}`;
+      const resp = await undiciFetch(`${OLLAMA_CLOUD_HOST_PROXY}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(req.body),
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Ollama Cloud error: ${resp.status}` });
+      const data = await resp.json();
+      res.json(data);
+    } else {
+      const resp = await undiciFetch(`${OLLAMA_URL_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body),
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!resp.ok) return res.status(resp.status).json({ error: `Ollama error: ${resp.status}` });
+      const data = await resp.json();
+      res.json(data);
+    }
   } catch (err) {
     res.status(503).json({ error: "Ollama unreachable", message: err.message });
   }

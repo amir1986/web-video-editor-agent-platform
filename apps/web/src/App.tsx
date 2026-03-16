@@ -53,7 +53,7 @@ type AIStep = typeof AI_STEPS[number];
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:3001";
 const STYLE_THRESHOLD = 4;
 // Default Ollama model — single source of truth for the UI fallback.
-const DEFAULT_MODEL = "qwen3-vl:8b-thinking";
+const DEFAULT_MODEL = "qwen3-vl:32b-thinking";
 
 export default function App() {
   const [state, setState] = useState<ProjectState>(defaultState);
