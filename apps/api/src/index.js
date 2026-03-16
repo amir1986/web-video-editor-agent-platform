@@ -2,6 +2,11 @@
 const path = require("path");
 try { require("dotenv").config({ path: path.resolve(__dirname, "../../../.env") }); } catch {}
 
+// Prevent LLM SDK errors from crashing the server process
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED REJECTION]", err?.message || err);
+});
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -1134,7 +1139,7 @@ if (fs.existsSync(webDist)) {
 const PORT = parseInt(process.env.PORT || "3001", 10);
 app.listen(PORT, () => {
   console.log(`VideoAgent API on http://localhost:${PORT}`);
-  console.log(`  LLM Provider: Ollama (local)`);
+  console.log(`  LLM Provider: ${(process.env.LLM_PROVIDER || "ollama-cloud")} | Model: ${process.env.LLM_MODEL || process.env.VISION_MODEL || "qwen3-vl:235b"}`);
   console.log(`  Auth: ${AUTH_ENABLED ? "ENABLED (set AUTH_SECRET)" : "DISABLED (open access)"}`);
   console.log("  POST /api/auth/login       - Get auth token");
   console.log("  GET  /api/auth/verify      - Verify token");

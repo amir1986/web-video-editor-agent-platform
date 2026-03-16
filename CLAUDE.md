@@ -124,7 +124,7 @@ Review the entire project and find architectural inconsistencies in the microser
 
 ## LLM Provider - Ollama Cloud API
 
-- Model: `qwen3-vl:32b-thinking`
+- Model: `qwen3-vl:235b`
 - Host: `https://ollama.com` (remote cloud, no local install)
 - SDK: `ollama` npm package
 - Auth: `OLLAMA_API_KEY` in `.env` (never commit)

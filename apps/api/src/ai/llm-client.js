@@ -9,7 +9,7 @@
  *   openai       — OpenAI API (needs OPENAI_API_KEY)
  *   openrouter   — OpenRouter (needs OPENROUTER_API_KEY)
  *
- * Default model: qwen3-vl:32b-thinking
+ * Default model: qwen3-vl:235b
  *
  * Agents call llmRequest(systemPrompt, userContent, { useVision }).
  * This module handles provider routing and format conversion internally.
@@ -17,7 +17,7 @@
 
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || "ollama-cloud").toLowerCase();
 
-const DEFAULT_MODEL = "qwen3-vl:32b-thinking";
+const DEFAULT_MODEL = "qwen3-vl:235b";
 const VISION_MODEL = process.env.VISION_MODEL || process.env.LLM_MODEL || DEFAULT_MODEL;
 const TEXT_MODEL   = process.env.TEXT_MODEL   || VISION_MODEL;
 
@@ -188,14 +188,22 @@ async function ollamaCloudRequest(systemPrompt, userContent, options = {}) {
   const model = useVision ? VISION_MODEL : TEXT_MODEL;
   const messages = convertToOllamaFormat(systemPrompt, userContent, useVision);
 
-  const response = await ollamaCloudClient.chat({
-    model,
-    messages,
-    stream: false,
-    options: { temperature },
-  });
+  let response;
+  try {
+    response = await ollamaCloudClient.chat({
+      model,
+      messages,
+      stream: false,
+      options: { temperature },
+    });
+  } catch (err) {
+    // The ollama SDK can throw with various error shapes — normalize to a string
+    const msg = err?.error?.message || err?.error || err?.message || String(err);
+    console.log(`[OLLAMA-CLOUD] Chat error (model=${model}, vision=${useVision}): ${String(msg).slice(0, 300)}`);
+    throw new Error(String(msg));
+  }
 
-  const text = response.message?.content || "";
+  const text = response?.message?.content || "";
   console.log(`[OLLAMA-CLOUD] Response (${text.length} chars, model=${model}, vision=${useVision})`);
   return extractJsonFromLLMText(text);
 }
