@@ -122,6 +122,17 @@ All progress events use the standardized shape `{ type, agent, message, timestam
 
 Review the entire project and find architectural inconsistencies in the microservices communication.
 
+## LLM Provider - Ollama Cloud API
+
+- Model: `qwen3-vl:32b-thinking`
+- Host: `https://ollama.com` (remote cloud, no local install)
+- SDK: `ollama` npm package
+- Auth: `OLLAMA_API_KEY` in `.env` (never commit)
+- Get free key: https://ollama.com/settings/keys
+- Vision: `images: [base64String]` (Ollama format, NOT OpenAI image_url)
+- Rate limits: free tier resets every 5h (session) and 7d (weekly)
+- Fallback: change `LLM_PROVIDER` env var to switch provider
+
 ## Workflow Checklist
 
 Before pushing or opening a PR, run these in order:
