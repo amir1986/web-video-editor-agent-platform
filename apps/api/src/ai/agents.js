@@ -88,16 +88,24 @@ Analyze the video and decide which parts to keep for the highlight reel.`;
     : userText;
 
   try {
+    console.log(`[CUT] Calling QWEN with ${frames.length} frames (vision=${frames.length > 0})`);
     const result = await llmRequest(systemPrompt, userContent, { useVision: frames.length > 0 });
-    if (result.segments?.length) return result;
+    if (result.segments?.length) {
+      console.log(`[CUT] QWEN returned ${result.segments.length} segments: ${result.segments.map(s => `${s.src_in}-${s.src_out}`).join(", ")}`);
+      return result;
+    }
     throw new Error("No segments returned");
   } catch (err) {
+    console.log(`[CUT] Vision call failed: ${err.message}`);
     // Vision not supported or failed — retry text-only
     if (frames.length > 0) {
       try {
+        console.log(`[CUT] Retrying text-only (no frames)...`);
         const result = await llmRequest(systemPrompt, userText, { useVision: false });
         if (result.segments?.length) return result;
-      } catch {}
+      } catch (retryErr) {
+        console.log(`[CUT] Text-only retry also failed: ${retryErr.message}`);
+      }
     }
     throw err;
   }

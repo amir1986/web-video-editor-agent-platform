@@ -60,9 +60,14 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
     }),
     dispatcher: LLM_AGENT,
   });
-  if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const errBody = await res.text();
+    console.log(`[OLLAMA] HTTP ${res.status} error (model=${useVision ? VISION_MODEL : TEXT_MODEL}): ${errBody.slice(0, 200)}`);
+    throw new Error(`Ollama HTTP ${res.status}: ${errBody}`);
+  }
   const data = await res.json();
   let text = data.choices?.[0]?.message?.content || "";
+  console.log(`[OLLAMA] Response (${text.length} chars, model=${useVision ? VISION_MODEL : TEXT_MODEL}, vision=${useVision})`);
 
   // Qwen "thinking" models wrap reasoning in <think>…</think> before the
   // actual answer. Strip the thinking block so the JSON regex doesn't pick
@@ -92,9 +97,13 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
  * @returns {object} Parsed JSON response
  */
 async function llmRequest(systemPrompt, userContent, options = {}) {
+  // Vision calls are expensive (60-120s each) and block the GPU.
+  // Don't retry them — a single attempt with 5-min timeout is enough.
+  // Retrying would take 240-360s total and block other QWEN requests.
+  const maxRetries = options.useVision ? 0 : 2;
   return withRetry(async () => {
     return ollamaRequest(systemPrompt, userContent, options);
-  }, { maxRetries: 2, label: "OLLAMA" });
+  }, { maxRetries, label: "OLLAMA" });
 }
 
 // ---------------------------------------------------------------------------
