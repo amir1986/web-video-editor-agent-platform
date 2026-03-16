@@ -46,13 +46,20 @@ export async function exportWithEditPlan(
   onProgress(30);
 
   const name = encodeURIComponent(filename.replace(".mp4", ""));
-  const editPlanParam = encodeURIComponent(JSON.stringify(editPlan));
+  const editPlanJson = JSON.stringify(editPlan);
+  console.log(`[EXPORT] Sending editPlan (${editPlanJson.length} chars) to /api/render`);
+
+  // Send editPlan via X-Edit-Plan header instead of query param to avoid
+  // URL length limits that silently truncate/lose the editPlan JSON.
   const res = await apiFetch(
-    `${apiBase}/api/render?name=${name}&editPlan=${editPlanParam}`,
+    `${apiBase}/api/render?name=${name}`,
     {
       method: "POST",
       body: videoBlob,
-      headers: { "Content-Type": "video/mp4" },
+      headers: {
+        "Content-Type": "video/mp4",
+        "X-Edit-Plan": editPlanJson,
+      },
     }
   );
 
@@ -60,6 +67,8 @@ export async function exportWithEditPlan(
   if (!res.ok) throw new Error(`Export failed: ${res.status} ${await res.text()}`);
 
   const blob = await res.blob();
+  const segCount = res.headers.get("X-Segments-Count") || "?";
+  console.log(`[EXPORT] Received ${(blob.size / 1024 / 1024).toFixed(1)}MB, ${segCount} segments rendered`);
   triggerDownload(blob, filename);
   onProgress(100);
 }

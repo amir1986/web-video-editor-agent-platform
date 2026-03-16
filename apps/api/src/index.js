@@ -694,17 +694,27 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
   if (!req.body || req.body.length === 0) return res.status(400).json({ error: "No video data received" });
   const name = req.query.name || "video";
 
-  // EditPlan: accept via query param (preferred) or X-Edit-Plan header (legacy)
-  const editPlanRaw = req.query.editPlan || req.headers["x-edit-plan"];
-  if (!editPlanRaw) return res.status(400).json({ error: "Missing editPlan query param or X-Edit-Plan header" });
+  // EditPlan: accept via X-Edit-Plan header (preferred) or query param (legacy)
+  const editPlanRaw = req.headers["x-edit-plan"] || req.query.editPlan;
+  if (!editPlanRaw) {
+    console.log("[RENDER-API] ERROR: No editPlan received (checked header and query param)");
+    return res.status(400).json({ error: "Missing X-Edit-Plan header or editPlan query param" });
+  }
   let editPlan;
   try {
     editPlan = JSON.parse(editPlanRaw);
-  } catch {
+  } catch (e) {
+    console.log(`[RENDER-API] ERROR: Invalid editPlan JSON (${editPlanRaw.length} chars): ${e.message}`);
     return res.status(400).json({ error: "Invalid editPlan JSON" });
   }
   const segments = editPlan.segments || [];
   if (!segments.length) return res.status(400).json({ error: "EditPlan has no segments" });
+
+  // Log segment details for debugging
+  console.log(`[RENDER-API] EditPlan received: ${segments.length} segments`);
+  for (const seg of segments) {
+    console.log(`[RENDER-API]   ${seg.id}: ${seg.src_in}s → ${seg.src_out}s (${(seg.src_out - seg.src_in).toFixed(1)}s)`);
+  }
 
   const tmpIn  = tmpFile("mp4"), tmpOut = tmpFile("mp4");
   const tmpDir = path.join(os.tmpdir(), `render_${crypto.randomBytes(4).toString("hex")}`);
@@ -715,25 +725,33 @@ app.post("/api/render", authMiddleware, express.raw({ type: "*/*", limit: "2gb" 
     console.log(`[RENDER-API] Input file: ${(inputSize / 1024 / 1024).toFixed(1)}MB`);
     const wslIn = toWslPath(tmpIn), wslOut = toWslPath(tmpOut);
 
-    // Probe source quality for source-matched encoding
+    // Probe source quality and duration for source-matched encoding
     const sourceQuality = await probeSourceQuality(wslIn);
 
     const finalDuration = segments.reduce((sum, s) => sum + (s.src_out - s.src_in), 0);
-    console.log(`[RENDER-API] EditPlan: ${segments.length} segments, ${finalDuration.toFixed(1)}s`);
+    console.log(`[RENDER-API] EditPlan: ${segments.length} segments, expected output ${finalDuration.toFixed(1)}s`);
 
     // Render the EditPlan directly — no AI pipeline
     const renderStart = Date.now();
     await renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality);
     const renderElapsed = ((Date.now() - renderStart) / 1000).toFixed(1);
     const outputSize = fs.statSync(tmpOut).size;
+
+    // Verify render produced a different (shorter) file
+    let outputDuration = 0;
+    try {
+      const durStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", toWslPath(tmpOut)]);
+      outputDuration = parseFloat(durStr.trim()) || 0;
+    } catch {}
     console.log(`[RENDER-API] Render done in ${renderElapsed}s`);
-    console.log(`[RENDER-API] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB)`);
+    console.log(`[RENDER-API] Output: ${(outputSize / 1024 / 1024).toFixed(1)}MB (input was ${(inputSize / 1024 / 1024).toFixed(1)}MB), duration: ${outputDuration.toFixed(1)}s`);
 
     const summary = `${segments.length} highlights rendered`;
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", `attachment; filename="${name}_highlights.mp4"`);
     res.set("X-AI-Summary", summary);
     res.set("X-Segments-Count", String(segments.length));
+    res.set("X-Output-Duration", String(outputDuration.toFixed(1)));
     res.sendFile(tmpOut, () => { cleanup(tmpIn, tmpOut); try { fs.rmSync(tmpDir, { recursive: true }); } catch {} });
   } catch (err) {
     cleanup(tmpIn, tmpOut);

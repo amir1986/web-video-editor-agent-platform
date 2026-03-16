@@ -776,6 +776,30 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error(err);
       saveAgentSummary(`Error: ${msg}`);
+      // Even on failure, save a fallback editPlan so the export button works.
+      // Without this, state.editPlan stays undefined and export falls through
+      // to a full-video trim (in=0, out=duration) — the user gets the original.
+      if (!state.editPlan && duration > 0) {
+        const fallbackSegs: Segment[] = duration <= 10
+          ? [{ id: "s1", src_in: 0, src_out: Math.round(duration * 0.7 * 10) / 10 }]
+          : duration <= 30
+            ? [{ id: "s1", src_in: 0, src_out: Math.round(duration * 0.35 * 10) / 10 },
+               { id: "s2", src_in: Math.round(duration * 0.45 * 10) / 10, src_out: Math.round(duration * 0.85 * 10) / 10 }]
+            : [{ id: "s1", src_in: 0, src_out: Math.round(duration * 0.15 * 10) / 10 },
+               { id: "s2", src_in: Math.round(duration * 0.25 * 10) / 10, src_out: Math.round((duration * 0.25 + duration * 0.15) * 10) / 10 },
+               { id: "s3", src_in: Math.round(duration * 0.5 * 10) / 10, src_out: Math.round((duration * 0.5 + duration * 0.15) * 10) / 10 },
+               { id: "s4", src_in: Math.round(duration * 0.85 * 10) / 10, src_out: Math.round(duration * 10) / 10 }];
+        const fallbackPlan: EditPlan = {
+          segments: fallbackSegs,
+          transitions: fallbackSegs.slice(0, -1).map((s, i) => ({ from: s.id, to: fallbackSegs[i + 1].id, type: "hard_cut" })),
+          render_constraints: { keep_resolution: true, keep_aspect_ratio: true, no_stretch: true },
+        };
+        setState(prev => {
+          const next = { ...prev, editPlan: fallbackPlan, inOut: { in: fallbackSegs[0].src_in, out: fallbackSegs[fallbackSegs.length - 1].src_out } };
+          saveToDB(next).catch(console.error);
+          return next;
+        });
+      }
     } finally {
       setAgentStartTime(null);
       setAgentCurrentStep(null);
@@ -798,8 +822,10 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       const name = activeClip.name.replace(/\.[^/.]+$/, "");
       const editPlan = state.editPlan;
       if (editPlan && editPlan.segments.length > 0) {
+        console.log(`[EXPORT] Using editPlan with ${editPlan.segments.length} segments:`, editPlan.segments.map(s => `${s.id}:${s.src_in}-${s.src_out}`).join(", "));
         await exportWithEditPlan(clipUrl, `${name}_highlight.mp4`, setExportProgress, editPlan, API_BASE);
       } else {
+        console.log(`[EXPORT] No editPlan — using trim: in=${state.inOut.in}, out=${state.inOut.out}`);
         await exportTrimmed(clipUrl, state.inOut.in, state.inOut.out, `${name}_highlight.mp4`, setExportProgress, API_BASE);
       }
       setExportDone(true);
