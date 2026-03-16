@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
-import { saveProjectState as saveToDB, loadProjectState as loadFromDB, saveFile, loadFile } from "./utils/indexedDB";
+import { saveProjectState as saveToDB, loadProjectState as loadFromDB, saveFile, loadFile, deleteFile, clearFiles } from "./utils/indexedDB";
 import { extractFrames } from "./frameExtractor";
 import { exportTrimmed, exportWithEditPlan, preloadFFmpeg } from "./export";
 import { ensureAuthToken, apiFetch } from "./utils/api-client";
@@ -294,6 +294,35 @@ export default function App() {
     e.target.value = "";
   };
 
+  const removeClip = (clipId: string) => {
+    const clip = state.clips.find(c => c.id === clipId);
+    if (clip?.url) URL.revokeObjectURL(clip.url);
+    deleteFile(clipId).catch(console.error);
+    const clips = state.clips.filter(c => c.id !== clipId);
+    const newState: ProjectState = { ...state, clips };
+    if (clips.length === 0) {
+      newState.inOut = { in: 0, out: 0 };
+      newState.editPlan = undefined;
+      newState.overlays = [];
+      setAgentSummary(null);
+      setExportDone(false);
+    }
+    save(newState);
+  };
+
+  const clearProject = () => {
+    // Revoke all blob URLs
+    for (const clip of state.clips) {
+      if (clip.url) URL.revokeObjectURL(clip.url);
+    }
+    clearFiles().catch(console.error);
+    save(defaultState);
+    setAgentSummary(null);
+    setExportDone(false);
+    setSessionResumeNeeded(false);
+    setToast("Project cleared");
+  };
+
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDraggingOver(true); };
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDraggingOver(false); };
   const handleDrop = (e: React.DragEvent) => {
@@ -314,8 +343,13 @@ export default function App() {
 
   const handleVideoLoad = () => {
     const dur = videoRef.current?.duration || 0;
-    const clips = state.clips.map((c, i) => i === state.clips.length - 1 ? { ...c, duration: dur } : c);
-    save({ ...state, clips, inOut: { in: 0, out: dur } });
+    const lastIdx = state.clips.length - 1;
+    const lastClip = state.clips[lastIdx];
+    // Only update the active (last) clip's duration; don't reset inOut if already set
+    if (!lastClip || lastClip.duration === dur) return;
+    const clips = state.clips.map((c, i) => i === lastIdx ? { ...c, duration: dur } : c);
+    const needsInOutReset = state.inOut.in === 0 && state.inOut.out === 0;
+    save({ ...state, clips, inOut: needsInOutReset ? { in: 0, out: dur } : state.inOut });
   };
 
   const togglePlay = () => {
@@ -553,9 +587,12 @@ export default function App() {
       if (apiResult && apiResult.segments?.length) {
         // API pipeline succeeded — use its result directly
         const segs = apiResult.segments;
-        let newInOut = state.inOut;
-        if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
-        save({ ...state, inOut: newInOut, editPlan: apiResult });
+        const newInOut = segs.length > 0 ? { in: segs[0].src_in, out: segs[segs.length - 1].src_out } : undefined;
+        setState(prev => {
+          const next = { ...prev, editPlan: apiResult, ...(newInOut ? { inOut: newInOut } : {}) };
+          saveToDB(next).catch(console.error);
+          return next;
+        });
         saveAgentSummary(`${segs.length} highlights selected via API pipeline`);
       } else {
         // Fall back to Ollama client-side pipeline
@@ -713,9 +750,12 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       setAgentProgress(prev => [...prev, `[QUALITY_GUARD] Quality checks passed`]);
 
       // ── Commit result ─────────────────────────────────────────────────────
-      let newInOut = state.inOut;
-      if (segs.length > 0) newInOut = { in: segs[0].src_in, out: segs[segs.length - 1].src_out };
-      save({ ...state, inOut: newInOut, editPlan });
+      const newInOut = segs.length > 0 ? { in: segs[0].src_in, out: segs[segs.length - 1].src_out } : undefined;
+      setState(prev => {
+        const next = { ...prev, editPlan, ...(newInOut ? { inOut: newInOut } : {}) };
+        saveToDB(next).catch(console.error);
+        return next;
+      });
       saveAgentSummary(`${segs.length} highlights selected via Ollama [${selectedModel}]`);
       }
 
@@ -780,7 +820,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = "merged.mp4"; document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
       setExportProgress(100);
       setExportDone(true);
       setToast("Merge complete — download started");
@@ -886,6 +926,13 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                   <Film className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
                   <span className="flex-1 text-xs text-foreground truncate">{c.name}</span>
                   <span className="text-[10px] font-mono text-muted-foreground flex-shrink-0">{fmt(c.duration)}</span>
+                  <button
+                    className="ml-0.5 text-muted-foreground hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
+                    onClick={(e) => { e.stopPropagation(); removeClip(c.id); }}
+                    title="Remove clip"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
                 </div>
               ))
             )}
@@ -895,6 +942,13 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
             <Button variant="outline" size="sm" className="w-full gap-2 mt-1" onClick={handleMerge}>
               <Merge className="w-3.5 h-3.5" />
               Merge ({state.clips.length} clips)
+            </Button>
+          )}
+
+          {state.clips.length > 0 && !agentLoading && !exporting && (
+            <Button variant="ghost" size="sm" className="w-full gap-2 text-muted-foreground hover:text-destructive" onClick={clearProject}>
+              <X className="w-3.5 h-3.5" />
+              Clear Project
             </Button>
           )}
 

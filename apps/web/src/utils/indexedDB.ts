@@ -59,3 +59,23 @@ export async function loadFile(clipId: string): Promise<File | null> {
     request.onerror = (e) => reject((e.target as IDBRequest).error);
   });
 }
+
+export async function deleteFile(clipId: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILES_STORE, "readwrite");
+    tx.objectStore(FILES_STORE).delete(clipId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject((e.target as IDBTransaction).error);
+  });
+}
+
+export async function clearFiles(): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILES_STORE, "readwrite");
+    tx.objectStore(FILES_STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject((e.target as IDBTransaction).error);
+  });
+}
