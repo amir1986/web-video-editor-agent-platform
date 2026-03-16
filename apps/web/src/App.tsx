@@ -563,7 +563,18 @@ export default function App() {
       }
       const m = cleaned.match(/\{[\s\S]*\}/);
       if (!m) throw new Error("No JSON in AI response: " + text.slice(0, 200));
-      return JSON.parse(m[0]);
+      let jsonStr = m[0];
+      try {
+        return JSON.parse(jsonStr);
+      } catch {
+        // Repair common LLM JSON errors: missing commas, trailing commas, single quotes
+        const repaired = jsonStr
+          .replace(/\}\s*\{/g, "},{")
+          .replace(/\]\s*\[/g, "],[")
+          .replace(/,\s*([}\]])/g, "$1")
+          .replace(/'/g, '"');
+        return JSON.parse(repaired);
+      }
     };
 
     // ── Deterministic fallback when all LLM agents fail ────────────────────

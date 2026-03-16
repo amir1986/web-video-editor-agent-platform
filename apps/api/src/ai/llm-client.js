@@ -81,7 +81,29 @@ async function ollamaRequest(systemPrompt, userContent, options = {}) {
 
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("LLM returned no JSON: " + text.slice(0, 300));
-  return JSON.parse(match[0]);
+
+  let jsonStr = match[0];
+  try {
+    return JSON.parse(jsonStr);
+  } catch (firstErr) {
+    // LLMs often produce malformed JSON — try to repair common issues:
+    // 1. Missing commas between objects in arrays: }{ → },{
+    // 2. Trailing commas before ] or }: ,] → ]  ,} → }
+    // 3. Single quotes → double quotes
+    const repaired = jsonStr
+      .replace(/\}\s*\{/g, "},{")           // missing comma between objects
+      .replace(/\]\s*\[/g, "],[")           // missing comma between arrays
+      .replace(/,\s*([}\]])/g, "$1")        // trailing commas
+      .replace(/'/g, '"');                    // single quotes
+    try {
+      console.log(`[OLLAMA] JSON repair: fixed malformed response (${firstErr.message})`);
+      return JSON.parse(repaired);
+    } catch {
+      // Log the raw text for debugging and throw the original error
+      console.log(`[OLLAMA] JSON parse failed even after repair. Raw: ${jsonStr.slice(0, 500)}`);
+      throw firstErr;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
