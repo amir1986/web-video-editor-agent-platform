@@ -367,161 +367,66 @@ async function renderEditPlan(wslIn, editPlan, wslOut, tmpDir, sourceQuality) {
     return;
   }
 
-  // Has soft transitions — need to re-encode with filter_complex.
-  // Uses xfade for ALL transitions when soft transitions are present
-  // (hard_cut uses a 1-frame xfade to keep the filter graph uniform —
-  // mixing concat and xfade in the same chain causes PTS/format mismatches
-  // that produce garbled frames at transition boundaries).
-  const FADE_DURATION = 0.5; // seconds for soft transition overlap
+  // Has soft transitions — apply fade effects to individual segments, then concat.
+  // Previous approach used chained xfade filters which produced frozen frames
+  // and wrong durations due to ffmpeg xfade PTS accumulation bugs.
+  const FADE_DURATION = 0.5; // seconds for soft transition fade
 
-  // Extract each segment to its own file.
-  // Re-encode during extraction for frame-accurate cuts — stream copy with
-  // pre-input -ss seeks to the nearest keyframe, leaving stuck/broken frames
-  // at the start of each segment. Since segments are re-encoded in the
-  // filter_complex step anyway, using a high-quality intermediate is lossless.
+  // Extract each segment and apply fade-in/fade-out effects for soft transitions.
+  // Each segment is processed independently (no chained filter graphs).
   const segFiles = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
+    const segDuration = seg.src_out - seg.src_in;
     const segPath = path.join(tmpDir, `seg_${i}.mp4`);
-    console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s`);
-    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(seg.src_out - seg.src_in), ...srcVideoArgs, ...srcAudioArgs, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
+
+    // Determine if this segment needs fade-out (transition TO next segment)
+    const transOut = transMap[seg.id];
+    const needsFadeOut = transOut && transOut.type !== "hard_cut" && segDuration > FADE_DURATION * 2;
+
+    // Determine if this segment needs fade-in (transition FROM previous segment)
+    const prevSeg = i > 0 ? segments[i - 1] : null;
+    const transIn = prevSeg ? transMap[prevSeg.id] : null;
+    const needsFadeIn = transIn && transIn.type !== "hard_cut" && segDuration > FADE_DURATION * 2;
+
+    const fadeFilters = [];
+    if (needsFadeIn) {
+      fadeFilters.push(`fade=t=in:st=0:d=${FADE_DURATION}`);
+    }
+    if (needsFadeOut) {
+      const fadeOutStart = Math.max(0, segDuration - FADE_DURATION);
+      fadeFilters.push(`fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${FADE_DURATION}`);
+    }
+
+    const audioFadeFilters = [];
+    if (needsFadeIn) {
+      audioFadeFilters.push(`afade=t=in:st=0:d=${FADE_DURATION}`);
+    }
+    if (needsFadeOut) {
+      const fadeOutStart = Math.max(0, segDuration - FADE_DURATION);
+      audioFadeFilters.push(`afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${FADE_DURATION}`);
+    }
+
+    const vfArgs = fadeFilters.length > 0 ? ["-vf", fadeFilters.join(",")] : [];
+    const afArgs = audioFadeFilters.length > 0 ? ["-af", audioFadeFilters.join(",")] : [];
+
+    const transLabel = needsFadeIn || needsFadeOut
+      ? ` (${needsFadeIn ? "fade-in" : ""}${needsFadeIn && needsFadeOut ? "+" : ""}${needsFadeOut ? "fade-out" : ""})`
+      : "";
+    console.log(`[RENDER] Extracting segment ${seg.id}: ${seg.src_in}s → ${seg.src_out}s${transLabel}`);
+    await ffmpeg(["-y", "-loglevel", "error", "-ss", String(seg.src_in), "-i", wslIn, "-t", String(segDuration), ...srcVideoArgs, ...srcAudioArgs, ...vfArgs, ...afArgs, "-avoid_negative_ts", "make_zero", toWslPath(segPath)]);
     segFiles.push(segPath);
   }
 
-  // Probe actual durations and whether the first segment has audio.
-  // VFR phone videos can produce extracted segments whose duration differs
-  // slightly from (src_out - src_in), causing wrong xfade offsets.
-  let hasAudio = false;
-  const segDurations = [];
-  for (let i = 0; i < segFiles.length; i++) {
-    try {
-      const durStr = await ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", toWslPath(segFiles[i])]);
-      segDurations.push(parseFloat(durStr.trim()) || (segments[i].src_out - segments[i].src_in));
-    } catch {
-      segDurations.push(segments[i].src_out - segments[i].src_in);
-    }
-    if (i === 0) {
-      try {
-        const audioProbe = await ffprobe(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", toWslPath(segFiles[0])]);
-        hasAudio = audioProbe.trim().length > 0;
-      } catch { hasAudio = false; }
-    }
-  }
-  console.log(`[RENDER] Actual segment durations: ${segDurations.map(d => d.toFixed(3)).join(", ")}s`);
-
-  // Build input args as array for execFile
-  const inputArgs = segFiles.flatMap(f => ["-i", toWslPath(f)]);
-
-  // Map transition type to xfade name
-  const xfadeType = (type) => {
-    switch (type) {
-      case "dissolve": return "dissolve";
-      case "fade": return "fade";
-      case "dip_to_black": return "fadeblack";
-      case "wipe": return "wipeleft";
-      default: return "fade";
-    }
-  };
-
-  // Normalize each input stream to ensure consistent pixel format, resolution,
-  // SAR, and frame rate before passing to xfade. Any mismatch in resolution or
-  // pixel format between xfade inputs produces garbled/corrupted frames.
-  const normFps = sourceQuality?.video?.fps > 0 ? sourceQuality.video.fps : 30;
-  const normW = sourceQuality?.video?.width > 0 ? sourceQuality.video.width : -2;
-  const normH = sourceQuality?.video?.height > 0 ? sourceQuality.video.height : -2;
-  const scaleFilter = (normW > 0 && normH > 0) ? `,scale=${normW}:${normH}` : "";
-  const normParts = [];
-  const normVideoLabels = [];
-  const normAudioLabels = [];
-  for (let i = 0; i < segFiles.length; i++) {
-    const normVLabel = `[nv${i}]`;
-    normParts.push(`[${i}:v]format=yuv420p,setsar=1${scaleFilter},fps=fps=${normFps}${normVLabel}`);
-    normVideoLabels.push(normVLabel);
-    if (hasAudio) {
-      const normALabel = `[na${i}]`;
-      normParts.push(`[${i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo${normALabel}`);
-      normAudioLabels.push(normALabel);
-    }
-  }
-
-  // Build the filter chain using xfade for ALL transitions. Hard cuts use a
-  // 1-frame xfade (instantaneous cut) to keep the graph uniform — mixing
-  // concat and xfade in the same chain causes PTS/format mismatches that
-  // produce garbled frames at transition boundaries.
-  const HARD_CUT_DUR = 1 / normFps; // 1 frame — visually instant
-  let filterParts = [];
-  let audioParts = [];
-  let lastVideoLabel = normVideoLabels[0];
-  let lastAudioLabel = hasAudio ? normAudioLabels[0] : null;
-  let cumulativeOffset = segDurations[0];
-
-  for (let i = 0; i < segments.length - 1; i++) {
-    const trans = transMap[segments[i].id];
-    const tType = trans?.type || "hard_cut";
-    const outLabel = `[v${i + 1}]`;
-    const aOutLabel = `[a${i + 1}]`;
-
-    const nextVLabel = normVideoLabels[i + 1];
-    const nextALabel = hasAudio ? normAudioLabels[i + 1] : null;
-
-    const isHardCut = (tType === "hard_cut");
-    // If segment is too short for a soft transition, force hard cut
-    const segTooShort = segDurations[i] < FADE_DURATION * 2 || segDurations[i + 1] < FADE_DURATION * 2;
-    const effectiveHardCut = isHardCut || segTooShort;
-    const fadeDur = effectiveHardCut ? HARD_CUT_DUR : FADE_DURATION;
-    const xfName = effectiveHardCut ? "fade" : xfadeType(tType);
-    const offset = Math.max(0, cumulativeOffset - fadeDur);
-
-    filterParts.push(`${lastVideoLabel}${nextVLabel}xfade=transition=${xfName}:duration=${fadeDur.toFixed(6)}:offset=${offset.toFixed(3)}${outLabel}`);
-    if (hasAudio) {
-      audioParts.push(`${lastAudioLabel}${nextALabel}acrossfade=d=${fadeDur.toFixed(6)}${aOutLabel}`);
-      lastAudioLabel = aOutLabel;
-    }
-    cumulativeOffset = offset + segDurations[i + 1];
-    lastVideoLabel = outLabel;
-  }
-
+  // Concat all segments — simple and robust (no chained filter graphs).
+  // Segments are already re-encoded with identical params, so stream copy is safe.
+  const concatFile = path.join(tmpDir, "concat.txt");
+  fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
+  console.log(`[RENDER] Concatenating ${segFiles.length} segments with stream copy`);
   try {
-    if (filterParts.length > 0) {
-      const allFilters = hasAudio
-        ? [...normParts, ...filterParts, ...audioParts]
-        : [...normParts, ...filterParts];
-      const filterComplex = allFilters.join(";");
-      const audioArgs = hasAudio ? srcAudioArgs : ["-an"];
-      console.log(`[RENDER] Re-encoding with transitions: ${filterParts.length} video filters, hasAudio=${hasAudio}`);
-      console.log(`[RENDER] Source-matched quality: v_bitrate=${sourceQuality?.video?.bitrate || "crf-fallback"}, a_bitrate=${sourceQuality?.audio?.bitrate || "192k-fallback"}`);
-      try {
-        const finalMapArgs = hasAudio
-          ? ["-map", lastVideoLabel, "-map", lastAudioLabel]
-          : ["-map", lastVideoLabel];
-        // Strip -s, -r, -movflags from source-matched args (xfade handles resolution/fps; movflags added at end)
-        const skipFlags = new Set(["-s", "-r", "-movflags"]);
-        const cleanVideoArgs = [];
-        for (let j = 0; j < srcVideoArgs.length; j++) {
-          if (skipFlags.has(srcVideoArgs[j])) { j++; continue; } // skip flag and its value
-          cleanVideoArgs.push(srcVideoArgs[j]);
-        }
-        // Write filter_complex to a script file to avoid shell escaping issues.
-        // WSL passes args through bash, which interprets semicolons as command
-        // separators — using -filter_complex_script bypasses this entirely.
-        const filterScriptPath = path.join(tmpDir, "filter.txt");
-        fs.writeFileSync(filterScriptPath, filterComplex);
-        console.log(`[RENDER] Filter script: ${filterComplex}`);
-        await ffmpeg(["-y", "-loglevel", "error", ...inputArgs, "-filter_complex_script", toWslPath(filterScriptPath), ...finalMapArgs, ...cleanVideoArgs, "-fps_mode", qFpsMode, ...audioArgs, "-movflags", "+faststart", wslOut]);
-      } catch (filterErr) {
-        console.log(`[RENDER] Filter complex failed (${filterErr.message}), falling back to re-encode concat`);
-        const concatFile = path.join(tmpDir, "concat.txt");
-        fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-        // Re-encode fallback: use source-matched quality to preserve dimensions and bitrate
-        await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), ...srcVideoArgs, ...srcAudioArgs, wslOut]);
-      }
-    } else {
-      const concatFile = path.join(tmpDir, "concat.txt");
-      fs.writeFileSync(concatFile, segFiles.map(f => `file '${toWslPath(f)}'`).join("\n"));
-      await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
-    }
+    await ffmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", toWslPath(concatFile), "-c", "copy", "-movflags", "+faststart", wslOut]);
   } finally {
-    for (const f of segFiles) try { fs.unlinkSync(f); } catch {}
+    for (const f of [...segFiles, concatFile]) try { fs.unlinkSync(f); } catch {}
   }
 }
 
