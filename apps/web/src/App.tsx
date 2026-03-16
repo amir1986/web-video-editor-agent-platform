@@ -1188,49 +1188,22 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
         </div>
       </main>
 
-      {/* ─── RIGHT PANEL ─── */}
+      {/* ─── RIGHT PANEL — AI Analysis ─── */}
       <aside className="flex flex-col bg-card border-l border-border overflow-hidden">
-        {/* Tabs */}
-        <div className="flex border-b border-border">
-          {tabItems.map(({ id, label, icon }) => (
-            <button
-              key={id}
-              className={cn(
-                "flex-1 flex items-center justify-center gap-1.5 px-3 py-3 text-xs font-semibold transition-all border-b-2 border-transparent",
-                activeTab === id
-                  ? "text-primary border-primary bg-primary/5"
-                  : "text-muted-foreground hover:text-foreground hover:bg-accent/5"
-              )}
-              onClick={() => switchTab(id)}
-            >
-              {icon}
-              {label}
-            </button>
-          ))}
+        {/* Header */}
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+          <Bot className="w-4 h-4 text-primary" />
+          <span className="text-xs font-semibold">AI Video Analysis</span>
+          <span className={cn("ml-auto w-2 h-2 rounded-full", ollamaConnected ? "bg-success" : "bg-destructive")} title={ollamaConnected ? "Connected" : "Not connected"} />
         </div>
 
         <div className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto">
-          {/* AI Tab */}
-          {activeTab === "ai" && (
+          {/* AI Panel — always visible (no tabs) */}
             <>
-              {!sessionResumeNeeded && (
-                <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
-                  AI agents analyze your video and select the best highlights. {styleProfile?.mode === "guided" ? "Using your established editing style." : "Approve edits to teach the AI your style."}
-                </div>
-              )}
-
-              {/* Ollama connection status */}
-              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md border border-border bg-secondary/40 text-[10px]">
-                <span className={cn("w-1.5 h-1.5 rounded-full", ollamaConnected ? "bg-success" : "bg-destructive")} />
-                <span className="text-muted-foreground">
-                  {ollamaConnected ? "Ollama (local)" : "Ollama not connected"}
-                </span>
-              </div>
-
-              {/* Model selector — populated dynamically from Ollama */}
+              {/* Model selector — VL models for vision-driven analysis */}
               <div className="flex flex-col gap-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-0.5">
-                  Model
+                  Vision Model
                 </label>
                 <select
                   value={selectedModel}
@@ -1245,11 +1218,6 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                     <option key={m.id} value={m.id}>{m.label}</option>
                   ))}
                 </select>
-                {selectedModel && (
-                  <p className="text-[9px] font-mono text-muted-foreground px-0.5 truncate" title={selectedModel}>
-                    {selectedModel}
-                  </p>
-                )}
               </div>
 
               {sessionResumeNeeded && activeClip && !agentLoading && (
@@ -1417,138 +1385,7 @@ Return ONLY valid JSON: {"segments":[{"id":"s1","src_in":<sec>,"src_out":<sec>,"
                 </div>
               )}
             </>
-          )}
-
-          {/* Text Overlays Tab */}
-          {activeTab === "overlays" && (
-            <>
-              <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
-                Add text overlays to your video. They will be burned into the export.
-              </div>
-
-              <Button variant="gradient" size="default" className="w-full gap-2" onClick={addOverlay} disabled={!activeClip}>
-                <Plus className="w-4 h-4" />
-                Add Text Overlay
-              </Button>
-
-              <div className="flex flex-col gap-2">
-                {(state.overlays || []).map(o => (
-                  <div key={o.id} className="flex flex-col gap-2 p-3 rounded-lg border border-border bg-secondary/50">
-                    <div className="flex items-center gap-2">
-                      <input
-                        className="flex-1 bg-background border border-border rounded-md px-2.5 py-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-all"
-                        value={o.text}
-                        onChange={e => updateOverlay(o.id, { text: e.target.value })}
-                        placeholder="Enter text..."
-                      />
-                      <button
-                        className="text-muted-foreground hover:text-destructive transition-colors p-1"
-                        onClick={() => removeOverlay(o.id)}
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-muted-foreground w-7">Size</span>
-                      <Slider
-                        className="flex-1"
-                        min={12}
-                        max={72}
-                        value={o.fontSize}
-                        onValueChange={(v) => updateOverlay(o.id, { fontSize: v })}
-                      />
-                      <span className="text-[10px] font-mono text-muted-foreground w-5 text-right">{o.fontSize}</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        Color
-                        <input
-                          type="color"
-                          value={o.color}
-                          onChange={e => updateOverlay(o.id, { color: e.target.value })}
-                          className="w-6 h-6 border-0 rounded cursor-pointer bg-transparent p-0"
-                        />
-                      </label>
-                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        X
-                        <Slider min={0} max={100} value={o.x} onValueChange={(v) => updateOverlay(o.id, { x: v })} className="flex-1" />
-                      </label>
-                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        Y
-                        <Slider min={0} max={100} value={o.y} onValueChange={(v) => updateOverlay(o.id, { y: v })} className="flex-1" />
-                      </label>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        From
-                        <input
-                          type="number"
-                          min={0}
-                          max={duration}
-                          step={0.1}
-                          value={o.from}
-                          onChange={e => updateOverlay(o.id, { from: parseFloat(e.target.value) || 0 })}
-                          className="w-14 bg-background border border-border rounded px-1.5 py-1 text-[10px] font-mono text-foreground outline-none focus:border-primary"
-                        />
-                      </label>
-                      <label className="flex-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        To
-                        <input
-                          type="number"
-                          min={0}
-                          max={duration}
-                          step={0.1}
-                          value={o.to}
-                          onChange={e => updateOverlay(o.id, { to: parseFloat(e.target.value) || duration })}
-                          className="w-14 bg-background border border-border rounded px-1.5 py-1 text-[10px] font-mono text-foreground outline-none focus:border-primary"
-                        />
-                      </label>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {/* Audio Tab */}
-          {activeTab === "audio" && (
-            <>
-              <div className="text-xs text-muted-foreground leading-relaxed p-3 rounded-lg bg-secondary/50 border border-border">
-                Adjust the audio volume for your video export.
-              </div>
-
-              <div className="flex flex-col gap-3 p-3 rounded-lg border border-border bg-secondary/50">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-semibold text-foreground">Volume</span>
-                  <span className="font-mono text-sm font-bold text-primary">{state.volume ?? 100}%</span>
-                </div>
-                <Slider
-                  min={0}
-                  max={200}
-                  value={state.volume ?? 100}
-                  onValueChange={(v) => save({ ...state, volume: v })}
-                />
-                <div className="flex gap-1.5">
-                  {[
-                    { label: "Mute", value: 0 },
-                    { label: "50%", value: 50 },
-                    { label: "100%", value: 100 },
-                    { label: "150%", value: 150 },
-                  ].map(({ label, value }) => (
-                    <Button
-                      key={value}
-                      variant="outline"
-                      size="sm"
-                      className={cn("flex-1 text-[10px]", state.volume === value && "border-primary text-primary")}
-                      onClick={() => save({ ...state, volume: value })}
-                    >
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
+          {/* Text/Audio tabs removed — UI focused on AI-driven workflow */}
         </div>
       </aside>
 
