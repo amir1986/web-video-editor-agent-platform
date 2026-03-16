@@ -25,15 +25,23 @@ const TEXT_MODEL   = process.env.TEXT_MODEL   || VISION_MODEL;
 // Provider: Ollama Cloud API (via `ollama` npm package, native format)
 // ---------------------------------------------------------------------------
 
-const { Ollama } = require("ollama");
+let Ollama;
+try {
+  Ollama = require("ollama").Ollama;
+} catch {
+  // Package not installed — ollama-cloud provider will fall back gracefully
+  Ollama = null;
+}
 
 const OLLAMA_CLOUD_HOST = process.env.OLLAMA_CLOUD_HOST || "https://ollama.com";
 const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY || "";
 
-const ollamaCloudClient = new Ollama({
-  host: OLLAMA_CLOUD_HOST,
-  ...(OLLAMA_API_KEY ? { headers: { Authorization: `Bearer ${OLLAMA_API_KEY}` } } : {}),
-});
+const ollamaCloudClient = Ollama
+  ? new Ollama({
+      host: OLLAMA_CLOUD_HOST,
+      ...(OLLAMA_API_KEY ? { headers: { Authorization: `Bearer ${OLLAMA_API_KEY}` } } : {}),
+    })
+  : null;
 
 // ---------------------------------------------------------------------------
 // Provider: Local Ollama / OpenAI / OpenRouter (OpenAI-compatible format)
@@ -175,6 +183,7 @@ function convertToOllamaFormat(systemPrompt, userContent, useVision) {
 
 async function ollamaCloudRequest(systemPrompt, userContent, options = {}) {
   logProviderOnce();
+  if (!ollamaCloudClient) throw new Error("ollama package not installed — run: npm i ollama");
   const { useVision = false, temperature = 0 } = options;
   const model = useVision ? VISION_MODEL : TEXT_MODEL;
   const messages = convertToOllamaFormat(systemPrompt, userContent, useVision);
@@ -260,6 +269,7 @@ async function llmRequest(systemPrompt, userContent, options = {}) {
 async function isOllamaAvailable() {
   try {
     if (LLM_PROVIDER === "ollama-cloud") {
+      if (!ollamaCloudClient) return false;
       // Use the ollama SDK to list models — lightweight check
       const models = await Promise.race([
         ollamaCloudClient.list(),

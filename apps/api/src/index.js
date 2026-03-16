@@ -1,7 +1,10 @@
-﻿const express = require("express");
+﻿// Load .env from project root (supports both monorepo root and apps/api)
+const path = require("path");
+try { require("dotenv").config({ path: path.resolve(__dirname, "../../../.env") }); } catch {}
+
+const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
-const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 

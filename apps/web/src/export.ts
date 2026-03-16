@@ -49,17 +49,15 @@ export async function exportWithEditPlan(
   const editPlanJson = JSON.stringify(editPlan);
   console.log(`[EXPORT] Sending editPlan (${editPlanJson.length} chars) to /api/render`);
 
-  // Send editPlan via X-Edit-Plan header instead of query param to avoid
-  // URL length limits that silently truncate/lose the editPlan JSON.
+  // Send editPlan as URL-encoded query param AND X-Edit-Plan header (belt + suspenders).
+  // Query param is the primary path; header is fallback if URL gets truncated.
+  const editPlanParam = encodeURIComponent(editPlanJson);
   const res = await apiFetch(
-    `${apiBase}/api/render?name=${name}`,
+    `${apiBase}/api/render?name=${name}&editPlan=${editPlanParam}`,
     {
       method: "POST",
       body: videoBlob,
-      headers: {
-        "Content-Type": "video/mp4",
-        "X-Edit-Plan": editPlanJson,
-      },
+      headers: { "Content-Type": "video/mp4" },
     }
   );
 
